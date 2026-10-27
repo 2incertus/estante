@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 
@@ -34,3 +35,23 @@ def client(fake_abs):
 def tmp_state_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("ESTANTE_STATE_DIR", str(tmp_path))
     return tmp_path
+
+
+def _load(name):
+    with open(FIXTURES / name, encoding="utf-8") as f:
+        return json.load(f)
+
+
+@pytest.fixture
+def audiobooks():
+    return _load("audiobooks.json")["results"]
+
+
+@pytest.fixture
+def me():
+    return _load("me.json")
+
+
+@pytest.fixture
+def jade_item():
+    return _load("item_616bf0b9-2c0c-472a-b975-72f35077d199.json")

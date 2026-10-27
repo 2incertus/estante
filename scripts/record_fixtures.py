@@ -142,7 +142,8 @@ def main(argv=None):
         save_json(out, name, data)
         shelves[lib_id] = sorted(data["results"], key=shelf_order)
 
-    save_json(out, "me.json", getter.get_json("/api/me"))
+    me = getter.get_json("/api/me")
+    save_json(out, "me.json", me)
     in_progress = getter.get_json("/api/me/items-in-progress", {"limit": 3})
     save_json(out, "in_progress.json", in_progress)
 
@@ -150,6 +151,12 @@ def main(argv=None):
     if in_progress.get("libraryItems"):
         detail_ids.append(in_progress["libraryItems"][0]["id"])
     detail_ids.append(JADE_CITY_ID)
+    # The latest finished book backs the "LAST LISTENED" fallback.
+    finished = [p for p in me.get("mediaProgress", []) if p.get("isFinished")]
+    if finished:
+        last = max(finished, key=lambda p: (p.get("finishedAt") or 0, p.get("lastUpdate") or 0))
+        if last["libraryItemId"] not in detail_ids:
+            detail_ids.append(last["libraryItemId"])
     for item_id in detail_ids:
         save_json(out, f"item_{item_id}.json", getter.get_json(f"/api/items/{item_id}"))
         prog = getter.get(f"/api/me/progress/{item_id}")

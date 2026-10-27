@@ -17,6 +17,7 @@ class FakeAbs:
         self.fixtures_dir = Path(fixtures_dir)
         self.fail_with = fail_with
         self.calls = []
+        self.overrides = {}
         self._server = None
         self._thread = None
 
@@ -43,6 +44,10 @@ class FakeAbs:
         self._thread.join(timeout=5)
         return False
 
+    def override(self, path, payload):
+        """Serve `payload` as JSON for this exact path, ahead of the fixtures."""
+        self.overrides[path] = payload
+
     @property
     def base_url(self):
         host, port = self._server.server_address[:2]
@@ -50,6 +55,8 @@ class FakeAbs:
 
     def _route(self, path):
         """Return (status, content_type, body) for a GET path."""
+        if path in self.overrides:
+            return self._json(self.overrides[path])
         parts = path.strip("/").split("/")
         if parts[:1] != ["api"]:
             return 404, None, None
