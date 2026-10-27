@@ -6,6 +6,7 @@ Rotates the playlist screens through InkyPi, answers the Ouvido daemon's
 has visibly changed. Stdlib only; runs on the Pi's system Python.
 """
 import argparse
+import http.client
 import json
 import logging
 import os
@@ -131,8 +132,10 @@ class InkyPi:
                 return 200 <= resp.status < 300
         except urllib.error.HTTPError as e:
             log.warning("InkyPi display %s failed: HTTP %s", instance, e.code)
-        except (urllib.error.URLError, OSError, ValueError) as e:
+        except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:
             log.warning("InkyPi display %s failed: %s", instance, e)
+        except Exception:  # never let a display error escape into the conductor
+            log.exception("InkyPi display %s failed", instance)
         return False
 
     def screens(self, device_json_path, playlist):
@@ -194,6 +197,7 @@ class Conductor(threading.Thread):
         self._nl_key = None
         self._nl_shown_at = None
         self._abs = None
+        self._booted = False
 
     # public API, called from HTTP threads
 
@@ -223,7 +227,10 @@ class Conductor(threading.Thread):
             raise ValueError(f"unknown action {action}")
         name = self._resolve(screen) if screen is not None else None
         with self._lock:
-            self._pending = (action, name)
+            # user actions (swap, show) replace each other and a pending redraw;
+            # a redraw never replaces a pending swap or show, which draws the badge anyway
+            if action != "redraw" or self._pending is None or self._pending[0] == "redraw":
+                self._pending = (action, name)
         return {"queued": action, "screen": name}
 
     def set_badge(self, incoming):
@@ -317,6 +324,11 @@ class Conductor(threading.Thread):
             # busy stays True until the bookkeeping is done, so a reader that
             # sees busy False also sees the new screen and next rotation
             return self._display_and_record(index, screen, key)
+        except Exception:
+            log.exception("showing %s failed", screen.name)
+            with self._lock:
+                self._next_due = self.clock() + min(FAILED_DISPLAY_RETRY_S, self.cfg["rotate_minutes"] * 60)
+            return False
         finally:
             with self._lock:
                 self._busy = False
@@ -401,7 +413,18 @@ class Conductor(threading.Thread):
             if self._pending is None:
                 self._pending = ("redraw", None)
 
+    def _startup(self):
+        # the first show draws the current badge, so a redraw queued during boot is moot
+        with self._lock:
+            self._booted = True
+            if self._pending is not None and self._pending[0] == "redraw":
+                self._pending = None
+        self._show(0, advance=True)
+
     def _tick(self):
+        if not self._booted:
+            self._startup()
+            return
         with self._lock:
             pending, self._pending = self._pending, None
             current = self._screens[self._current] if self._current is not None else None
@@ -421,12 +444,17 @@ class Conductor(threading.Thread):
             self._poll_now_listening(now)
 
     def run(self):
+        try:
+            self._run()
+        except Exception:  # logged here; main sees the dead thread and exits non-zero
+            log.exception("conductor crashed")
+
+    def _run(self):
         self._abs = self.abs_factory()
         if self._abs is None:
             log.info("ABS_URL or ABS_TOKEN missing in %s: Now-listening watch disabled", self.cfg["inkypi_env"])
         if not self._wait_ready() or not self._wait_screens():
             return
-        self._show(0, advance=True)
         while not self._stop_event.is_set():
             try:
                 self._tick()
@@ -501,20 +529,27 @@ def make_handler(conductor):
             badge, changed = conductor.set_badge(data)
             self._send(202, {"badge": badge, "redraw": changed})
 
+        def _guarded(self, method):
+            try:
+                self._dispatch(method)
+            except Exception as e:
+                log.exception("%s %s failed", method, self.path)
+                self._send(500, {"error": str(e) or type(e).__name__})
+
         def do_GET(self):
-            self._dispatch("GET")
+            self._guarded("GET")
 
         def do_POST(self):
-            self._dispatch("POST")
+            self._guarded("POST")
 
         def do_PUT(self):
-            self._dispatch("PUT")
+            self._guarded("PUT")
 
         def do_PATCH(self):
-            self._dispatch("PATCH")
+            self._guarded("PATCH")
 
         def do_DELETE(self):
-            self._dispatch("DELETE")
+            self._guarded("DELETE")
 
     return Handler
 
@@ -524,6 +559,15 @@ def serve(cfg, conductor):
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, name="estante-http", daemon=True).start()
     return server
+
+
+def wait_for_exit(done, conductor, interval=1.0):
+    """Block until `done` is set (0) or the conductor thread dies on its own (1)."""
+    while not done.wait(interval):
+        if not conductor.is_alive():
+            log.error("conductor thread died, exiting so systemd restarts the service")
+            return 1
+    return 0
 
 
 def main(argv=None):
@@ -542,13 +586,13 @@ def main(argv=None):
     conductor.start()
     server = serve(cfg, conductor)
     log.info("listening on %s:%s", cfg["listen"], cfg["port"])
-    done.wait()
+    code = wait_for_exit(done, conductor)
     log.info("stopping")
     server.shutdown()
     server.server_close()
     conductor.stop()
     conductor.join(timeout=10)
-    return 0
+    return code
 
 
 if __name__ == "__main__":

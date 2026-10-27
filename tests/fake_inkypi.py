@@ -51,6 +51,8 @@ class FakeInkyPi:
         self.displays = []
         self.failed = []
         self._fail_left = 0
+        self._malformed_left = 0
+        self.malformed = []
         self._lock = threading.Lock()
         self._tmp = None
         self._server = None
@@ -96,6 +98,11 @@ class FakeInkyPi:
         with self._lock:
             self._fail_left = n
 
+    def malformed_next(self, n):
+        """The next n display calls get a broken status line (http.client.BadStatusLine)."""
+        with self._lock:
+            self._malformed_left = n
+
     def _reply(self, req, status, payload):
         body = json.dumps(payload).encode()
         req.send_response(status)
@@ -114,6 +121,16 @@ class FakeInkyPi:
             entry = (data.get("playlist_name"), data.get("plugin_id"), data.get("plugin_instance"))
             if self.delay_s:
                 time.sleep(self.delay_s)
+            with self._lock:
+                broken = self._malformed_left > 0
+                if broken:
+                    self._malformed_left -= 1
+            if broken:
+                self.malformed.append((time.monotonic(), entry))
+                req.wfile.write(b"NOT-HTTP garbage\r\n\r\n")
+                req.wfile.flush()
+                req.close_connection = True
+                return
             with self._lock:
                 fail = self._fail_left > 0
                 if fail:

@@ -76,7 +76,7 @@ def tmp_state(tmp_path):
 def make_conductor(fake_inkypi, fake_abs, tmp_state):
     started = []
 
-    def make(with_abs=True, **overrides):
+    def make(with_abs=True, start=True, **overrides):
         cfg = dict(estante_ctl.DEFAULTS)
         cfg.update(
             inkypi_url=fake_inkypi.url,
@@ -96,14 +96,16 @@ def make_conductor(fake_inkypi, fake_abs, tmp_state):
         conductor = estante_ctl.Conductor(
             cfg, estante_ctl.InkyPi(cfg["inkypi_url"]), factory, str(tmp_state)
         )
-        conductor.start()
+        if start:
+            conductor.start()
         started.append(conductor)
         return conductor
 
     yield make
     for c in started:
         c.stop()
-        c.join(timeout=5)
+        if c.ident is not None:
+            c.join(timeout=5)
         assert not c.is_alive()
 
 
@@ -370,3 +372,90 @@ def test_helpers(tmp_path, monkeypatch):
 def test_example_config_matches_defaults():
     example = json.loads((REPO / "ctl" / "estante.example.json").read_text())
     assert example == estante_ctl.DEFAULTS
+
+
+def test_malformed_status_line_does_not_stop_rotation(fake_inkypi, make_conductor):
+    fake_inkypi.malformed_next(1)
+    conductor = make_conductor()
+    wait_until(lambda: fake_inkypi.malformed, 5)
+    wait_until(lambda: len(fake_inkypi.displays) >= 2, 6)
+    assert conductor.is_alive()
+    fake_inkypi.malformed_next(3)
+    wait_until(lambda: len(fake_inkypi.malformed) >= 4, 8)
+    times = [t for t, _ in fake_inkypi.malformed[1:4]]
+    # each failed attempt pushes the next one out by min(60 s, 1.2 s rotation), not one tick
+    assert all(b - a >= 1.0 for a, b in zip(times, times[1:]))
+    wait_until(lambda: not conductor.snapshot()["busy"], 3)
+    assert conductor._next_due > conductor.clock()
+    count = len(fake_inkypi.displays)
+    wait_until(lambda: len(fake_inkypi.displays) > count, 5)
+    assert conductor.is_alive()
+
+
+def test_redraw_never_replaces_a_queued_show(http, fake_inkypi, conductor):
+    fake_inkypi.delay_s = 1.0
+    assert http.post("/swap").status == 202
+    wait_until(lambda: conductor.snapshot()["busy"], 2)
+    assert http.post("/show", {"screen": "light_novels"}).status == 202
+    reply = http.post("/badge", {"message_waiting": True})
+    assert reply.body["redraw"] is True
+    wait_until(lambda: len(fake_inkypi.displays) >= 3, 5)
+    assert names(fake_inkypi)[:3] == ["Now listening", "The shelf", "Light novels"]
+    time.sleep(1.5)
+    assert len(fake_inkypi.displays) == 3
+
+
+def test_show_replaces_a_queued_redraw(conductor):
+    conductor.request("redraw")
+    assert conductor._pending == ("redraw", None)
+    conductor.request("show", "the_shelf")
+    assert conductor._pending == ("show", "The shelf")
+    conductor.request("swap")
+    assert conductor._pending == ("swap", None)
+    conductor.request("redraw")
+    assert conductor._pending == ("swap", None)
+
+
+def test_startup_show_clears_a_boot_time_redraw(fake_inkypi, make_conductor, tmp_state):
+    conductor = make_conductor(start=False, rotate_minutes=10, poll_minutes=10)
+    badge, changed = conductor.set_badge({"message_waiting": True})
+    assert changed is True
+    conductor.start()
+    wait_until(lambda: fake_inkypi.displays, 5)
+    time.sleep(1.0)
+    assert names(fake_inkypi) == ["Now listening"]
+    assert read_state(str(tmp_state))["badge"]["message_waiting"] is True
+
+
+def test_startup_keeps_a_boot_time_show(fake_inkypi, make_conductor):
+    conductor = make_conductor(start=False, rotate_minutes=10, poll_minutes=10)
+    conductor.request("show", "Light novels")
+    conductor.set_badge({"dnd": True})
+    conductor.start()
+    wait_until(lambda: len(fake_inkypi.displays) >= 2, 5)
+    assert names(fake_inkypi)[:2] == ["Now listening", "Light novels"]
+
+
+def test_unexpected_handler_error_answers_json_500(http, conductor, monkeypatch):
+    def boom(incoming):
+        raise RuntimeError("state dir is read-only")
+
+    monkeypatch.setattr(conductor, "set_badge", boom)
+    reply = http.post("/badge", {"dnd": True})
+    assert reply.status == 500
+    assert reply.content_type == "application/json"
+    assert reply.body == {"error": "state dir is read-only"}
+
+
+def test_wait_for_exit_reports_a_dead_conductor(make_conductor):
+    def broken_factory():
+        raise RuntimeError("boom")
+
+    conductor = make_conductor(start=False)
+    conductor.abs_factory = broken_factory
+    conductor.start()
+    conductor.join(timeout=5)
+    assert estante_ctl.wait_for_exit(threading.Event(), conductor, interval=0.05) == 1
+    done = threading.Event()
+    done.set()
+    assert estante_ctl.wait_for_exit(done, conductor, interval=0.05) == 0
