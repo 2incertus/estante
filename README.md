@@ -107,4 +107,4 @@ NODE_PATH=/home/ubuntu/node_modules node scripts/shoot-inkypi.js   # screenshots
 
 ## License
 
-GPL-3.0, as the plugins subclass InkyPi's GPL-3.0 code. EB Garamond and Inter are under the SIL Open Font License.
+GPL-3.0, as the plugins subclass InkyPi's GPL-3.0 code. EB Garamond and Inter are under the SIL Open Font License 1.1; the text is in `plugins/estante_lib/fonts/OFL.txt`.
