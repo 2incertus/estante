@@ -55,3 +55,37 @@ def me():
 @pytest.fixture
 def jade_item():
     return _load("item_616bf0b9-2c0c-472a-b975-72f35077d199.json")
+
+
+def _cover_image(client, cache_dir, item_id, updated_at, width):
+    from PIL import Image
+
+    from estante_lib.abs import CoverCache
+
+    path = CoverCache(str(cache_dir), client).path(item_id, updated_at, width)
+    if not path:
+        return None
+    with Image.open(path) as img:
+        return img.convert("RGB")
+
+
+def _overgeared_view(client, cache_dir):
+    from estante_lib.model import pick_now_listening
+    from estante_lib.render_now import NowListeningView
+    from estante_lib.state import DEFAULT_BADGE
+
+    nl = pick_now_listening(client)
+    assert nl.item_id == "4aa1594d-b6ce-441f-9ab3-951ff1340009"
+    assert nl.chapter_count == 820
+    cover = _cover_image(client, cache_dir, nl.item_id, nl.updated_at, 400)
+    return NowListeningView(nl, cover, 7, 2026, dict(DEFAULT_BADGE))
+
+
+@pytest.fixture
+def now_view(client, tmp_path):
+    return _overgeared_view(client, tmp_path / "covers")
+
+
+@pytest.fixture
+def overgeared_view(client, tmp_path):
+    return _overgeared_view(client, tmp_path / "covers")
