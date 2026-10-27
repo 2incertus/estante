@@ -174,6 +174,8 @@ class NowListening:
 
     @property
     def pct(self):
+        if self.finished:
+            return 1.0
         if not self.duration:
             return 0.0
         return min(1.0, max(0.0, self.current_time / self.duration))
@@ -202,10 +204,14 @@ def _duration(*sources):
 def _now_listening(meta_item, detail, prog, finished):
     md = _metadata(meta_item)
     author, narrator, series = _names(md)
+    chapters = list((detail.get("media") or {}).get("chapters") or [])
     duration = _duration(
         (meta_item.get("media") or {}).get("duration"),
         (detail.get("media") or {}).get("duration"),
         prog.get("duration"),
+        # Finished records often store duration 0 and the plain item detail has
+        # none, so the end of the last chapter stands in for a finished book.
+        chapters[-1].get("end") if finished and chapters else 0,
     )
     return NowListening(
         item_id=meta_item["id"],
@@ -216,7 +222,7 @@ def _now_listening(meta_item, detail, prog, finished):
         updated_at=int(meta_item.get("updatedAt") or 0),
         duration=duration,
         current_time=duration if finished else float(prog.get("currentTime") or 0),
-        chapters=list((detail.get("media") or {}).get("chapters") or []),
+        chapters=chapters,
         finished=finished,
         finished_at=prog.get("finishedAt"),
         last_update=int(prog.get("lastUpdate") or 0),

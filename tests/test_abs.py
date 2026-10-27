@@ -1,4 +1,6 @@
 import os
+import socket
+import threading
 
 import pytest
 
@@ -130,3 +132,54 @@ def test_creds_from_env_missing_raises():
 
 def test_creds_from_env_reads_both():
     assert creds_from_env({"ABS_URL": "http://h:1", "ABS_TOKEN": "t"}) == ("http://h:1", "t")
+
+
+def test_schemeless_url_raises_abserror():
+    with pytest.raises(AbsError) as e:
+        AbsClient("127.0.0.1:9", "x", timeout=1).me()
+    assert "127.0.0.1" in str(e.value)
+    with pytest.raises(AbsError) as e:
+        AbsClient("abs.local", "x", timeout=1).me()      # urllib raises ValueError here
+    assert "abs.local" in str(e.value)
+
+
+def test_truncated_body_raises_abserror():
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+
+    def serve():
+        conn, _ = srv.accept()
+        conn.recv(4096)
+        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"a\"")
+        conn.close()
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    try:
+        with pytest.raises(AbsError) as e:       # http.client.IncompleteRead underneath
+            AbsClient(f"http://127.0.0.1:{port}", "x", timeout=2).me()
+        assert "127.0.0.1" in str(e.value)
+    finally:
+        t.join(timeout=2)
+        srv.close()
+
+
+def test_cover_cache_returns_none_when_client_raises(tmp_path):
+    class Broken:
+        def cover_bytes(self, item_id, width):
+            raise AbsError("Audiobookshelf h: dropped")
+
+    assert CoverCache(str(tmp_path), Broken()).path(COVER_ID, 1, 80) is None
+
+
+def test_cover_route_serves_width_variant(client):
+    # ls tests/fixtures/covers | grep w400 -> only the in-progress item has a w400 file
+    body = client.cover_bytes("4aa1594d-b6ce-441f-9ab3-951ff1340009", 400)
+    assert body and body[:2] == b"\xff\xd8"
+
+
+def test_cover_cache_width_400_under_fake(client, tmp_path):
+    path = CoverCache(str(tmp_path), client).path("4aa1594d-b6ce-441f-9ab3-951ff1340009", 1, 400)
+    assert path and os.path.basename(path) == "4aa1594d-b6ce-441f-9ab3-951ff1340009-1-w400.jpg"

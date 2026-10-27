@@ -1,5 +1,6 @@
 """Audiobookshelf client (GET only) and an on-disk cover cache. Stdlib only."""
 import glob
+import http.client
 import json
 import os
 import socket
@@ -23,10 +24,10 @@ class AbsClient:
         url = self.base_url + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
-        req = urllib.request.Request(
-            url, method="GET", headers={"Authorization": f"Bearer {self._token}"}
-        )
         try:
+            req = urllib.request.Request(
+                url, method="GET", headers={"Authorization": f"Bearer {self._token}"}
+            )
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 return resp.read()
         except urllib.error.HTTPError as e:
@@ -37,7 +38,7 @@ class AbsClient:
             raise AbsError(f"Audiobookshelf {self.host}: {e.reason}") from e
         except (socket.timeout, TimeoutError) as e:
             raise AbsError(f"Audiobookshelf {self.host}: timed out") from e
-        except OSError as e:
+        except (OSError, http.client.HTTPException, ValueError) as e:
             raise AbsError(f"Audiobookshelf {self.host}: {e}") from e
 
     def _decode(self, body, path):

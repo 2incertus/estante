@@ -11,7 +11,6 @@ Usage:
 import argparse
 import json
 import os
-import re
 import sys
 import urllib.error
 import urllib.parse
@@ -31,6 +30,9 @@ SANITIZE_KEYS = {
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURES_ROOT = os.path.join(REPO, "tests", "fixtures")
+
+sys.path.insert(0, os.path.join(REPO, "plugins"))
+from estante_lib.model import shelf_sort_key  # noqa: E402  (stdlib only)
 
 
 def read_env(path):
@@ -84,22 +86,6 @@ class Getter:
         return json.loads(body)
 
 
-def series_order(series_name):
-    m = re.match(r"^(.*?)\s*#\s*([0-9]+(?:\.[0-9]+)?)", series_name or "")
-    if m:
-        return (m.group(1).strip().lower(), float(m.group(2)))
-    return ((series_name or "").lower(), 0.0)
-
-
-def shelf_order(item):
-    # Mirrors estante_lib.model.shelf_sort_key; kept local so this script
-    # stays a standalone tool.
-    md = item["media"]["metadata"]
-    author = (md.get("authorNameLF") or "").lower() or "\uffff"
-    title = (md.get("titleIgnorePrefix") or md.get("title") or "").lower()
-    return (author, series_order(md.get("seriesName") or ""), title)
-
-
 def save_json(out, name, payload):
     with open(os.path.join(out, name), "w", encoding="utf-8", newline="\n") as f:
         json.dump(sanitize(payload), f, ensure_ascii=True, indent=1)
@@ -140,7 +126,7 @@ def main(argv=None):
     for lib_id, name in ((AUDIOBOOKS_ID, "audiobooks.json"), (LIGHT_NOVELS_ID, "light_novels.json")):
         data = getter.get_json(f"/api/libraries/{lib_id}/items", {"limit": 0, "minified": 1})
         save_json(out, name, data)
-        shelves[lib_id] = sorted(data["results"], key=shelf_order)
+        shelves[lib_id] = sorted(data["results"], key=shelf_sort_key)
 
     me = getter.get_json("/api/me")
     save_json(out, "me.json", me)

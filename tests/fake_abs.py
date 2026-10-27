@@ -53,7 +53,7 @@ class FakeAbs:
         host, port = self._server.server_address[:2]
         return f"http://{host}:{port}"
 
-    def _route(self, path):
+    def _route(self, path, query=None):
         """Return (status, content_type, body) for a GET path."""
         if path in self.overrides:
             return self._json(self.overrides[path])
@@ -76,6 +76,10 @@ class FakeAbs:
         if len(rest) == 3 and rest[:2] == ["me", "progress"]:
             return self._file(f"progress_{rest[2]}.json", "application/json")
         if len(rest) == 3 and rest[0] == "items" and rest[2] == "cover":
+            width = (query or {}).get("width", [""])[0]
+            sized = f"covers/{rest[1]}-w{width}.jpg"
+            if width and (self.fixtures_dir / sized).is_file():
+                return self._file(sized, "image/jpeg")
             return self._file(f"covers/{rest[1]}.jpg", "image/jpeg")
         return 404, None, None
 
@@ -89,14 +93,15 @@ class FakeAbs:
         return 200, content_type, p.read_bytes()
 
     def _handle(self, req):
-        path = urllib.parse.urlsplit(req.path).path
+        parts = urllib.parse.urlsplit(req.path)
+        path = parts.path
         self.calls.append(path)
         if self.fail_with is not None:
             status, ctype, body = self.fail_with, None, None
         elif req.headers.get("Authorization") != f"Bearer {TOKEN}":
             status, ctype, body = 401, None, None
         else:
-            status, ctype, body = self._route(path)
+            status, ctype, body = self._route(path, urllib.parse.parse_qs(parts.query))
         if body is None:
             body = b"Not Found" if status == 404 else b"error"
             ctype = "text/plain"

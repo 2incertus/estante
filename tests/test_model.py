@@ -226,3 +226,27 @@ def test_visible_key_changes_on_chapter_and_percent_only():
     assert visible_key(_nl(500.0, chapters), {"message_waiting": True}) != a
     assert visible_key(_nl(500.0, chapters), {"dnd": True}) != a
     assert visible_key(None, {}) == ("none", -1, 0, False, False, False)
+
+
+def test_last_listened_with_zero_duration_record_is_complete(client, fake_abs, me):
+    # Most finished records carry duration 0:
+    # jq '.mediaProgress | map(select(.isFinished and .duration == 0)) | length' tests/fixtures/me.json
+    records = [dict(p) for p in me["mediaProgress"]]
+    for p in records:
+        if p["libraryItemId"] == SHADOW_SLAVE_1:
+            p["duration"] = 0
+    fake_abs.override("/api/me/items-in-progress", {"libraryItems": []})
+    fake_abs.override("/api/me", {"mediaProgress": records})
+    nl = pick_now_listening(client)
+    assert nl.item_id == SHADOW_SLAVE_1 and nl.finished is True
+    assert nl.pct == 1.0
+    assert nl.chapter_idx == nl.chapter_count - 1
+    # jq '.media.chapters[-1].end' tests/fixtures/item_90d6f040-088b-4245-a5ac-43d97ac9475d.json
+    assert nl.duration == nl.current_time == 57697.80245099999
+
+
+def test_finished_pct_is_full_even_without_duration():
+    nl = _nl(0, [])
+    nl.finished = True
+    nl.duration = 0
+    assert nl.pct == 1.0
