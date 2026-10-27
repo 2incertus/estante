@@ -56,6 +56,15 @@ step() {
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --abs-url|--abs-token|--inkypi|--audiobooks-id|--novels-id)
+            if [ "$#" -lt 2 ]; then
+                echo "install: $1 needs a value" >&2
+                usage >&2
+                exit 2
+            fi
+            ;;
+    esac
+    case "$1" in
         --abs-url) ABS_URL="${2%/}"; shift 2 ;;
         --abs-token) ABS_TOKEN="$2"; shift 2 ;;
         --inkypi) INKYPI="${2%/}"; shift 2 ;;
@@ -136,6 +145,10 @@ EOF
         if grep -q "^$key=" "$ENV_FILE"; then
             echo "$key already set, left as is"
         else
+            # A hand-edited .env may lack its final newline; do not glue onto its last line.
+            if [ -n "$(tail -c 1 "$ENV_FILE")" ]; then
+                echo >> "$ENV_FILE"
+            fi
             echo "$pair" >> "$ENV_FILE"
             echo "$key added"
         fi

@@ -8,21 +8,23 @@ from plugins.estante_lib.inkypi_glue import (
     dimensions,
     load_cover,
     saturation,
+    with_api_key,
 )
 from plugins.estante_lib.model import build_shelf, progress_index
 from plugins.estante_lib.render_shelf import ShelfView, page_books, render_shelf
 from plugins.estante_lib.state import read_state, update_state
 
 COVER_WIDTH = 80
-LAYOUTS = ("pages", "mosaic")
+MOSAIC = "mosaic"
+# layout setting -> (cols, rows) of a page; "mosaic" puts the whole library on one screen.
+PAGE_GRIDS = {"pages": (10, 5), "pages_large": (8, 4)}
+DEFAULT_LAYOUT = "pages"
 DEFAULT_TITLE = "The shelf"
-ABS_KEYS = {"required": True, "service": "Audiobookshelf", "expected_key": "ABS_URL and ABS_TOKEN"}
 
 
 class TheShelf(BasePlugin):
     def generate_settings_template(self):
-        template_params = super().generate_settings_template()
-        template_params["api_key"] = ABS_KEYS
+        template_params = with_api_key(super().generate_settings_template())
         try:
             libraries = abs_client(EnvKeys()).libraries()
             template_params["libraries"] = [
@@ -38,9 +40,9 @@ class TheShelf(BasePlugin):
         library_id = settings.get("library_id")
         if not library_id:
             raise RuntimeError("Choose a library")
-        layout = settings.get("layout", "pages")
-        if layout not in LAYOUTS:
-            layout = "pages"
+        layout = settings.get("layout", DEFAULT_LAYOUT)
+        if layout != MOSAIC and layout not in PAGE_GRIDS:
+            layout = DEFAULT_LAYOUT
         title = settings.get("title") or DEFAULT_TITLE
         size = dimensions(device_config)
         client = abs_client(device_config)
@@ -52,11 +54,13 @@ class TheShelf(BasePlugin):
         except AbsError as e:
             raise RuntimeError(str(e)) from e
 
-        if layout == "mosaic":
+        if layout == MOSAIC:
+            cols, rows = PAGE_GRIDS[DEFAULT_LAYOUT]
             shown, page, pages = books, 0, 1
         else:
+            cols, rows = PAGE_GRIDS[layout]
             requested = read_state()["pages"].get(library_id, 0)
-            shown, page, pages = page_books(books, requested)
+            shown, page, pages = page_books(books, requested, cols * rows)
         cache = cover_cache(client)
         covers = {}
         for book in shown:
@@ -70,8 +74,10 @@ class TheShelf(BasePlugin):
             books,
             covers,
             page=page,
-            layout=layout,
+            layout=MOSAIC if layout == MOSAIC else "pages",
             badge=read_state()["badge"],
+            cols=cols,
+            rows=rows,
         )
         img = render_shelf(view, size, saturation(device_config))
 

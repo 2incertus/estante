@@ -34,7 +34,8 @@ DEFAULTS = {
     "port": 8360,
     "inkypi_url": "http://127.0.0.1:80",
     "inkypi_device_json": "/usr/local/inkypi/src/config/device.json",
-    "inkypi_env": "/usr/local/inkypi/.env",
+    # Empty: derived from the real location of InkyPi's src (see load_config).
+    "inkypi_env": "",
     "playlist": "Default",
     "rotate_minutes": 30,
     "poll_minutes": 5,
@@ -65,7 +66,19 @@ def load_config(path=None):
         if not isinstance(loaded, dict):
             raise ValueError(f"config {path} must be a JSON object")
         cfg.update(loaded)
+    if not cfg.get("inkypi_env"):
+        cfg["inkypi_env"] = derive_inkypi_env(cfg["inkypi_device_json"])
     return cfg
+
+
+def derive_inkypi_env(device_json):
+    """InkyPi's .env: the checkout root next to the real src, as InkyPi itself finds it.
+
+    device.json lives at <src>/config/device.json and /usr/local/inkypi/src is a symlink
+    to the checkout's src, so two levels up through the real path is the checkout root.
+    """
+    root = os.path.realpath(os.path.join(os.path.dirname(device_json), "..", ".."))
+    return os.path.join(root, ".env")
 
 
 def parse_env_file(path):

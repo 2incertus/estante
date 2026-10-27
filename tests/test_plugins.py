@@ -24,6 +24,7 @@ from plugins.now_listening.now_listening import NowListening  # noqa: E402
 from plugins.the_shelf.the_shelf import TheShelf  # noqa: E402
 
 AUDIOBOOKS_PAGES = 7  # 311 items in audiobooks.json, 50 per page
+AUDIOBOOKS_LARGE_PAGES = 10  # 311 items, 32 per page
 
 
 class FakeDeviceConfig:
@@ -147,6 +148,23 @@ def test_shelf_writes_page_count_and_reads_page(fake_abs, client, tmp_state_dir)
     assert img7.tobytes() != img.tobytes()
     page7 = expected_shelf_render(client, cache, AUDIOBOOKS_ID, "The shelf", "Audiobooks, by author", "pages", 6)
     assert img7.tobytes() == to_rgb(page7, driver_palette(0.5)).tobytes()
+
+
+def test_shelf_larger_pages(fake_abs, client, tmp_state_dir):
+    write_state({"pages": {AUDIOBOOKS_ID: 2}})
+    settings = {"library_id": AUDIOBOOKS_ID, "layout": "pages_large"}
+    img = TheShelf({"id": "the_shelf"}).generate_image(settings, FakeDeviceConfig(abs=fake_abs))
+    _assert_panel_ready(img)
+    assert read_state()["page_counts"] == {AUDIOBOOKS_ID: AUDIOBOOKS_LARGE_PAGES}
+    expected = expected_shelf_render(
+        client, tmp_state_dir / "expected", AUDIOBOOKS_ID, "The shelf", "Audiobooks, by author",
+        "pages", 2, cols=8, rows=4,
+    )
+    assert img.tobytes() == to_rgb(expected, driver_palette(0.5)).tobytes()
+    normal = expected_shelf_render(
+        client, tmp_state_dir / "expected", AUDIOBOOKS_ID, "The shelf", "Audiobooks, by author", "pages", 2
+    )
+    assert img.tobytes() != to_rgb(normal, driver_palette(0.5)).tobytes()
 
 
 def test_shelf_title_and_mosaic(fake_abs, client, tmp_state_dir):

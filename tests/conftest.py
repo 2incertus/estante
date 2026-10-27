@@ -152,16 +152,17 @@ def expected_now_render(client, cache_dir, year, tz, badge=None):
     return render_now_listening(view)
 
 
-def expected_shelf_render(client, cache_dir, library_id, title, subtitle, layout, page):
+def expected_shelf_render(client, cache_dir, library_id, title, subtitle, layout, page, cols=10, rows=5):
     """The shelf rendered directly from estante_lib, as the plugin should."""
     from estante_lib.model import build_shelf, progress_index
     from estante_lib.render_shelf import ShelfView, page_books, render_shelf
 
     books = build_shelf(client.library_items(library_id), progress_index(client.me()))
-    shown = books if layout == "mosaic" else page_books(books, page)[0]
+    shown = books if layout == "mosaic" else page_books(books, page, cols * rows)[0]
     covers = {}
     for book in shown:
         img = _cover_image(client, cache_dir, book.item_id, book.updated_at, 80)
         if img is not None:
             covers[book.item_id] = img
-    return render_shelf(ShelfView(title, subtitle, books, covers, page=page, layout=layout))
+    view = ShelfView(title, subtitle, books, covers, page=page, layout=layout, cols=cols, rows=rows)
+    return render_shelf(view)

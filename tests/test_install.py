@@ -50,3 +50,9 @@ def test_dev_http_only_fails_cleanly_when_inkypi_is_down():
         env={"INKYPI_URL": "http://127.0.0.1:9", "ESTANTE_WAIT_SECONDS": "1"},
     )
     assert result.returncode == 1 and "127.0.0.1:9" in result.stderr
+
+
+@pytest.mark.parametrize("flag", ["--abs-url", "--abs-token", "--inkypi", "--audiobooks-id", "--novels-id"])
+def test_flag_without_value_names_the_flag(flag):
+    result = _run("--abs-url", "http://abs.local:13378", flag)
+    assert result.returncode == 2 and f"{flag} needs a value" in result.stderr

@@ -3,7 +3,7 @@
 Estante puts an Audiobookshelf library on a 7.3 inch Spectra 6 e-ink panel on the office bookshelf. Three screens take turns:
 
 - **Now listening**: the cover of the audiobook in progress, its title, author, narrator and series, a progress bar with chapter ticks, the current chapter and the time left. With nothing in progress it shows the last finished book under LAST LISTENED, and with no history at all, NOTHING PLAYING.
-- **The shelf**: every book in the Audiobooks library as a tile in shelf order (author, then series, then title), 50 covers to a page. Read books are in colour, the book being listened to has a red frame, unread books are pale grey ghosts.
+- **The shelf**: every book in the Audiobooks library as a tile in shelf order (author, then series, then title), 50 covers to a page (or 32 larger covers, or the whole library on one screen, set per instance). Read books are in colour, the book being listened to has a red frame, unread books are pale grey ghosts.
 - **Light novels**: the same shelf for the Light Novels library.
 
 A small conductor service, estante-ctl, rotates the screens (every 30 minutes by default), turns the shelf pages, redraws Now listening when the chapter or progress visibly changes, and takes button presses and the message-waiting mark from the Ouvido daemon on the same Pi. Estante only ever reads Audiobookshelf with GET requests; it never writes progress, marks anything finished or starts a scan.
@@ -72,7 +72,7 @@ estante-ctl reads this file (path from `ESTANTE_CONFIG`, set in the service unit
 | `port` | `8360` | its port; Ouvido expects 8360 |
 | `inkypi_url` | `http://127.0.0.1:80` | where InkyPi answers |
 | `inkypi_device_json` | `/usr/local/inkypi/src/config/device.json` | InkyPi's config, read for the playlist's instances |
-| `inkypi_env` | set by the installer | InkyPi's `.env`, read for `ABS_URL` and `ABS_TOKEN` |
+| `inkypi_env` | empty | InkyPi's `.env`, read for `ABS_URL` and `ABS_TOKEN`; empty = derived from the real location of InkyPi's src; the installer writes the explicit path |
 | `playlist` | `Default` | the InkyPi playlist whose instances rotate |
 | `rotate_minutes` | `30` | time each screen stays up |
 | `poll_minutes` | `5` | how often Now listening checks Audiobookshelf |
@@ -100,7 +100,7 @@ NODE_PATH=/home/ubuntu/node_modules node scripts/shoot-inkypi.js   # screenshots
 - The look on the real panel is not verified yet. Every pixel is a driver colour and the driver pass is a no-op in tests, but how Spectra 6 inks read on the shelf has to be checked once the panel arrives.
 - Leave InkyPi's image settings (saturation, contrast, sharpness, brightness) at their defaults. Any other value makes InkyPi blend the image before the driver sees it, and flat areas will dither.
 - InkyPi's own daily playlist tick only matters if estante-ctl is dead; then the screens would rotate once a day.
-- Covers come from Audiobookshelf the first time each shelf page is drawn, and a mosaic pulls the whole library at once. The first pass over both libraries fetches up to 900 covers (311 audiobooks and 597 light novels), several minutes over WiFi; after that they come from the cache in `/var/lib/estante/covers`.
+- Covers come from Audiobookshelf the first time each shelf page is drawn, and a mosaic pulls the whole library at once. The first pass over both libraries fetches about 900 covers (311 audiobooks and 597 light novels), several minutes over WiFi; after that they come from the cache in `/var/lib/estante/covers`.
 - Estante screens are landscape only; InkyPi's orientation must stay horizontal.
 
 ## License

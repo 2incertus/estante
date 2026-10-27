@@ -11,6 +11,13 @@ from .state import state_dir
 
 LANDSCAPE_ONLY = "Estante screens are landscape; set InkyPi orientation to horizontal"
 NO_CREDENTIALS = "Set ABS_URL and ABS_TOKEN on InkyPi's API Keys page"
+ABS_KEYS = {"required": True, "service": "Audiobookshelf", "expected_key": "ABS_URL and ABS_TOKEN"}
+
+
+def with_api_key(template_params):
+    """Mark a settings page with InkyPi's "Requires API Key" tag for the ABS keys."""
+    template_params["api_key"] = dict(ABS_KEYS)
+    return template_params
 
 
 class EnvKeys:

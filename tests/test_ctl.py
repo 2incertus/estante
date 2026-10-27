@@ -366,7 +366,29 @@ def test_helpers(tmp_path, monkeypatch):
     monkeypatch.setenv("ESTANTE_CONFIG", str(cfg_file))
     assert estante_ctl.load_config(None)["port"] == 9999
     monkeypatch.delenv("ESTANTE_CONFIG")
-    assert estante_ctl.load_config(None) == estante_ctl.DEFAULTS
+    defaults = estante_ctl.load_config(None)
+    assert {k: v for k, v in defaults.items() if k != "inkypi_env"} == {
+        k: v for k, v in estante_ctl.DEFAULTS.items() if k != "inkypi_env"
+    }
+
+
+def test_inkypi_env_derived_from_real_src(tmp_path):
+    # InkyPi's installer links /usr/local/inkypi/src to the checkout's src, and InkyPi
+    # reads .env from the checkout root, found through the real path.
+    root = tmp_path / "InkyPi"
+    (root / "src" / "config").mkdir(parents=True)
+    (root / "src" / "config" / "device.json").write_text("{}")
+    other = tmp_path / "usr-local-inkypi"
+    other.mkdir()
+    (other / "src").symlink_to(root / "src")
+    cfg_file = tmp_path / "estante.json"
+    cfg_file.write_text(json.dumps({"inkypi_device_json": str(other / "src" / "config" / "device.json")}))
+    cfg = estante_ctl.load_config(str(cfg_file))
+    assert cfg["inkypi_env"] == str((root / ".env").resolve())
+
+    cfg_file.write_text(json.dumps({"inkypi_env": "/etc/explicit.env"}))
+    assert estante_ctl.load_config(str(cfg_file))["inkypi_env"] == "/etc/explicit.env"
+    assert estante_ctl.DEFAULTS["inkypi_env"] == ""
 
 
 def test_example_config_matches_defaults():

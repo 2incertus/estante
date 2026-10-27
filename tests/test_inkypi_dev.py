@@ -38,6 +38,7 @@ INSTANCES = [
     ("now_listening", "Now listening", {}),
     ("the_shelf", "The shelf", {"library_id": AUDIOBOOKS_ID, "layout": "pages", "title": "The shelf"}),
     ("the_shelf", "Light novels", {"library_id": LIGHT_NOVELS_ID, "layout": "mosaic", "title": "Light novels"}),
+    ("the_shelf", "Large novels", {"library_id": LIGHT_NOVELS_ID, "layout": "pages_large", "title": "Large novels"}),
 ]
 # Files inside the checkout that dev mode writes and this test puts back.
 RESTORED = [
@@ -137,6 +138,9 @@ def test_inkypi_dev_renders_identical_images(dev, tmp_path):
         "Light novels": expected_shelf_render(
             client, cache, LIGHT_NOVELS_ID, "Light novels", "Light Novels, by author", "mosaic", 0
         ),
+        "Large novels": expected_shelf_render(
+            client, cache, LIGHT_NOVELS_ID, "Large novels", "Light Novels, by author", "pages", 0, cols=8, rows=4
+        ),
     }
     for plugin_id, name, _ in INSTANCES:
         shown = _display(http, plugin_id, name)
@@ -146,7 +150,8 @@ def test_inkypi_dev_renders_identical_images(dev, tmp_path):
         assert not any(passed.histogram()[6:])
         assert passed.tobytes() == expected[name].tobytes(), name
 
-    assert read_state()["page_counts"] == {AUDIOBOOKS_ID: 7, LIGHT_NOVELS_ID: 1}
+    # Both Light Novels instances share one page count; the 32-per-page one drew last.
+    assert read_state()["page_counts"] == {AUDIOBOOKS_ID: 7, LIGHT_NOVELS_ID: 19}
 
 
 def test_inkypi_dev_settings_pages(dev):
@@ -157,6 +162,8 @@ def test_inkypi_dev_settings_pages(dev):
     html = page.get_data(as_text=True)
     assert "Light Novels" in html and f'value="{AUDIOBOOKS_ID}"' in html
     assert 'name="layout"' in html and "Whole library on one screen" in html
+    assert '<option value="pages_large">32 covers per page, larger</option>' in html
+    assert '<option value="pages" selected>50 covers per page</option>' in html
     assert "pluginSettings.library_id" in html
 
     _add_instance(http, "the_shelf", "Edit check", INSTANCES[2][2])

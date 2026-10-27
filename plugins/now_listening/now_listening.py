@@ -8,20 +8,18 @@ from plugins.estante_lib.inkypi_glue import (
     load_cover,
     local_year,
     saturation,
+    with_api_key,
 )
 from plugins.estante_lib.model import finished_in_year, pick_now_listening
 from plugins.estante_lib.render_now import NowListeningView, render_now_listening
 from plugins.estante_lib.state import read_state
 
 COVER_WIDTH = 400
-ABS_KEYS = {"required": True, "service": "Audiobookshelf", "expected_key": "ABS_URL and ABS_TOKEN"}
 
 
 class NowListening(BasePlugin):
     def generate_settings_template(self):
-        template_params = super().generate_settings_template()
-        template_params["api_key"] = ABS_KEYS
-        return template_params
+        return with_api_key(super().generate_settings_template())
 
     def generate_image(self, settings, device_config):
         size = dimensions(device_config)

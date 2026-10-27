@@ -17,7 +17,8 @@
     <div class="form-group">
         <label for="estanteLayout" class="form-label">Layout</label>
         <select id="estanteLayout" name="layout" class="form-input">
-            <option value="pages" selected>Pages of 50 covers</option>
+            <option value="pages" selected>50 covers per page</option>
+            <option value="pages_large">32 covers per page, larger</option>
             <option value="mosaic">Whole library on one screen</option>
         </select>
     </div>
@@ -39,7 +40,9 @@
                 }
                 library.value = pluginSettings.library_id;
             }
-            document.getElementById('estanteLayout').value = pluginSettings.layout || 'pages';
+            const layout = document.getElementById('estanteLayout');
+            const layouts = ['pages', 'pages_large', 'mosaic'];
+            layout.value = layouts.includes(pluginSettings.layout) ? pluginSettings.layout : 'pages';
             document.getElementById('estanteTitle').value = pluginSettings.title || '';
         }
     });
