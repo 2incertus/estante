@@ -119,3 +119,20 @@ def test_dominant_index_ignores_white():
         img.putpixel((x, 0), pal[RED])
     assert dominant_index(img, pal) == RED
     assert dominant_index(Image.new("RGB", (10, 10), pal[WHITE]), pal) == WHITE
+
+
+def test_dominant_index_exclude():
+    pal = driver_palette(0.5)
+    img = Image.new("RGB", (10, 10), pal[WHITE])
+    for x in range(10):
+        img.putpixel((x, 0), pal[RED])
+        img.putpixel((x, 1), pal[RED])
+    for x in range(4):
+        img.putpixel((x, 2), pal[BLUE])
+    assert dominant_index(img, pal) == RED
+    assert dominant_index(img, pal, exclude=(WHITE, RED)) == BLUE
+    # excluding WHITE no longer: a mostly paper image is WHITE
+    assert dominant_index(img, pal, exclude=()) == WHITE
+    # nothing left after the exclusions: WHITE, as before
+    red_only = Image.new("RGB", (10, 10), pal[RED])
+    assert dominant_index(red_only, pal, exclude=(WHITE, RED)) == WHITE

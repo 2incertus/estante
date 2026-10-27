@@ -1,7 +1,7 @@
 import dataclasses
 
 from estante_lib.model import STATUS_LISTENING, STATUS_READ, STATUS_UNREAD, ShelfBook, shelf_counts
-from estante_lib.palette import BLACK, BLUE, GREEN, RED, WHITE, driver_palette, inky_pass, to_rgb
+from estante_lib.palette import BLACK, BLUE, GREEN, RED, WHITE, YELLOW, driver_palette, inky_pass, to_rgb
 from estante_lib.render_shelf import (
     MOSAIC_FLAT_BELOW,
     PAGE_COLS,
@@ -56,7 +56,7 @@ def test_grid_for_light_novels():
 
 def test_pages_layout_places_fifty_tiles_and_red_frame(shelf_view):
     img = render_shelf(shelf_view)
-    assert img.size == (800, 480) and img.mode == "P" and max(img.getdata()) <= 5
+    assert img.size == (800, 480) and img.mode == "P" and max(img.tobytes()) <= 5
     idx = _first(shelf_view.books, STATUS_LISTENING)
     x, y = _tile_xy(idx)
     assert img.getpixel((x - 2, y + 30)) == RED  # frame left
@@ -113,7 +113,7 @@ def test_header_counts_and_page_line(shelf_view):
 def test_large_tiles_eight_by_four(shelf_view):
     view = dataclasses.replace(shelf_view, cols=8, rows=4)
     img = render_shelf(view)
-    assert max(img.getdata()) <= 5
+    assert max(img.tobytes()) <= 5
     tile, cell = 82, 86
     x0 = 40 + (720 - 8 * cell) // 2
     idx = _first(shelf_view.books, STATUS_LISTENING, limit=32)
@@ -131,7 +131,7 @@ def test_mosaic_light_novels_flat_tiles(novels_view):
     x0 = 40 + (720 - cols * cell) // 2
     y0 = 88 + (344 - rows * cell) // 2
     img = render_shelf(novels_view)
-    assert img.size == (800, 480) and max(img.getdata()) <= 5
+    assert img.size == (800, 480) and max(img.tobytes()) <= 5
     unread = _first(novels_view.books, STATUS_UNREAD, limit=len(novels_view.books))
     x, y = _tile_xy(unread, cols, cell, x0, y0)
     assert img.getpixel((x + tile // 2, y + tile // 2)) == WHITE
@@ -205,3 +205,42 @@ def test_mosaic_red_only_for_listening(shelf_view):
         x, y = _tile_xy(i, cols, cell, x0, y0)
         centre = img.getpixel((x + tile // 2, y + tile // 2))
         assert (centre == RED) == (b.status == STATUS_LISTENING), (i, b.title)
+
+
+def test_unread_cover_tile_is_a_monochrome_ghost(shelf_view):
+    img = render_shelf(shelf_view)
+    idx = _first(shelf_view.books, STATUS_UNREAD, True, shelf_view.covers)
+    x, y = _tile_xy(idx)
+    box = (x, y, x + TILE, y + TILE)
+    for ink in (YELLOW, RED, BLUE, GREEN):
+        assert _count(img, box, ink) == 0, ink
+    assert _count(img, box, BLACK) >= 1
+    assert _count(img, box, WHITE) > 0.5 * TILE * TILE  # faded toward paper
+
+
+def test_unread_missing_cover_tile_is_a_grey_ghost(shelf_view):
+    img = render_shelf(shelf_view)
+    idx = _first(shelf_view.books, STATUS_UNREAD, False, shelf_view.covers)
+    x, y = _tile_xy(idx)
+    box = (x, y, x + TILE, y + TILE)
+    assert _count(img, box, BLUE) == 0
+    assert _count(img, box, BLACK) >= 1
+
+
+def test_mosaic_large_tile_frames_survive_neighbours():
+    books = [ShelfBook(f"b{i}", "t", "a", "", 1, STATUS_READ) for i in range(60)]
+    books[13] = dataclasses.replace(books[13], status=STATUS_LISTENING)
+    view = ShelfView("The shelf", "Audiobooks, by author", books, {}, layout="mosaic")
+    cols, rows, cell = grid_for(60, (720, 344))
+    tile = cell - 1
+    assert tile >= MOSAIC_FLAT_BELOW
+    x0 = 40 + (720 - cols * cell) // 2
+    y0 = 88 + (344 - rows * cell) // 2
+    x, y = _tile_xy(13, cols, cell, x0, y0)
+    img = render_shelf(view)
+    mid = tile // 2
+    for k in (1, 2, 3):
+        assert img.getpixel((x + tile - 1 + k, y + mid)) == RED, ("right", k)
+        assert img.getpixel((x + mid, y + tile - 1 + k)) == RED, ("bottom", k)
+        assert img.getpixel((x - k, y + mid)) == RED, ("left", k)
+        assert img.getpixel((x + mid, y - k)) == RED, ("top", k)

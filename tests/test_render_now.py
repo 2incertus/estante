@@ -1,7 +1,7 @@
 import dataclasses
 import math
 
-from estante_lib.palette import BLACK, RED, WHITE, driver_palette, inky_pass, to_rgb
+from estante_lib.palette import BLACK, BLUE, GREEN, RED, WHITE, driver_palette, inky_pass, to_rgb
 from estante_lib.render_now import NowListeningView, render_now_listening
 from estante_lib.state import DEFAULT_BADGE
 
@@ -16,13 +16,13 @@ def _count(img, box, index):
 def test_render_size_mode_and_palette_only(now_view):
     img = render_now_listening(now_view)
     assert img.size == (800, 480) and img.mode == "P"
-    assert max(img.getdata()) <= 5
+    assert max(img.tobytes()) <= 5
     assert img.getpalette()[:18] == [v for c in driver_palette(0.5) for v in c]
 
 
 def test_inky_pass_noop_on_now_listening(now_view):
     img = render_now_listening(now_view)
-    assert list(inky_pass(to_rgb(img, driver_palette(0.5))).getdata()) == list(img.getdata())
+    assert inky_pass(to_rgb(img, driver_palette(0.5))).tobytes() == img.tobytes()
 
 
 def test_progress_bar_filled_to_pct(now_view):
@@ -59,14 +59,16 @@ def test_render_without_narrator_or_series(now_view):
     nl = dataclasses.replace(now_view.nl, narrator="", series="")
     img = render_now_listening(dataclasses.replace(now_view, nl=nl))
     assert img.size == (800, 480) and img.mode == "P"
-    # nothing BLUE in the text column when there is no series line
-    assert _count(img, (470, 100, 761, 290), 4) == 0
+    # nothing BLUE in the text column when there is no series line, and no GREEN
+    # specks: antialiased glyph edges would snap to both in finish()
+    assert _count(img, (470, 100, 761, 290), BLUE) == 0
+    assert _count(img, (470, 100, 761, 290), GREEN) == 0
 
 
 def test_series_line_is_blue(now_view):
     nl = dataclasses.replace(now_view.nl, series="Overgeared #1")
     img = render_now_listening(dataclasses.replace(now_view, nl=nl))
-    assert _count(img, (470, 100, 761, 290), 4) > 30
+    assert _count(img, (470, 100, 761, 290), BLUE) > 30
 
 
 def test_cover_fills_the_left_box(now_view):
@@ -90,7 +92,7 @@ def test_footer_default_and_brand(now_view):
     assert all(img.getpixel((x, 410)) == BLACK for x in range(470, 761))  # rule
     assert _count(img, (470, 424, 640, 441), BLACK) > 0  # "7 finished in 2026"
     assert _count(img, (470, 424, 640, 441), RED) == 0
-    assert _count(img, (680, 424, 761, 441), 5) > 0  # ESTANTE in GREEN
+    assert _count(img, (680, 424, 761, 441), GREEN) > 0  # ESTANTE in GREEN
 
 
 def test_badge_draws_red_message_in_footer(now_view):
@@ -105,5 +107,5 @@ def test_waiting_message_takes_the_marks_room(now_view):
     # in a 290 px column: the message keeps every word and the mark gives way.
     badge = {"message_waiting": True, "dnd": True, "count": 1, "from": "Jasmine"}
     img = render_now_listening(dataclasses.replace(now_view, badge=badge))
-    assert _count(img, (470, 420, 761, 445), 5) == 0
+    assert _count(img, (470, 420, 761, 445), GREEN) == 0
     assert _count(img, (700, 424, 761, 441), RED) > 0

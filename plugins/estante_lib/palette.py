@@ -45,9 +45,11 @@ def fade(img, paper, amount=0.78):
     return Image.blend(rgb, Image.new("RGB", rgb.size, tuple(paper)), amount)
 
 
-def dominant_index(img, pal):
+def dominant_index(img, pal, exclude=(WHITE,)):
+    """Most common ink of `img` (no dither), skipping `exclude`; WHITE when nothing is left."""
     counts = quantize(img, pal, dither=False).histogram()[:6]
-    counts[WHITE] = 0
+    for i in exclude:
+        counts[i] = 0
     best = max(range(6), key=lambda i: counts[i])
     return best if counts[best] else WHITE
 
