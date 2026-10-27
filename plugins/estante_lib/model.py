@@ -229,14 +229,24 @@ def _now_listening(meta_item, detail, prog, finished):
     )
 
 
+IN_PROGRESS_LOOKAHEAD = 10
+
+
 def pick_now_listening(client):
-    in_progress = client.items_in_progress(1)
-    if in_progress:
-        entry = in_progress[0]
+    # podcast episodes share both lists; only books belong on Now listening
+    books = [
+        e for e in client.items_in_progress(IN_PROGRESS_LOOKAHEAD) if e.get("mediaType") == "book"
+    ]
+    if books:
+        entry = books[0]
         detail = client.item(entry["id"])
         prog = client.progress(entry["id"]) or {}
         return _now_listening(entry, detail, prog, finished=False)
-    finished = [p for p in client.me().get("mediaProgress", []) if p.get("isFinished")]
+    finished = [
+        p
+        for p in client.me().get("mediaProgress", [])
+        if p.get("isFinished") and not p.get("episodeId") and p.get("libraryItemId")
+    ]
     if not finished:
         return None
     last = max(finished, key=lambda p: (p.get("finishedAt") or 0, p.get("lastUpdate") or 0))

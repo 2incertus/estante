@@ -43,12 +43,12 @@ def saturation(device_config):
     return float(settings.get("inky_saturation", 0.5))
 
 
-def abs_client(device_config):
+def abs_client(device_config, timeout=None):
     url = device_config.load_env_key("ABS_URL")
     token = device_config.load_env_key("ABS_TOKEN")
     if not url or not token:
         raise RuntimeError(NO_CREDENTIALS)
-    return AbsClient(url, token)
+    return AbsClient(url, token) if timeout is None else AbsClient(url, token, timeout=timeout)
 
 
 def cover_cache(client):

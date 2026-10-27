@@ -1,4 +1,6 @@
 """InkyPi plugin: one Audiobookshelf library as a shelf of covers, paged or as one mosaic."""
+import logging
+
 from plugins.base_plugin.base_plugin import BasePlugin
 from plugins.estante_lib.abs import AbsError
 from plugins.estante_lib.inkypi_glue import (
@@ -20,13 +22,17 @@ MOSAIC = "mosaic"
 PAGE_GRIDS = {"pages": (10, 5), "pages_large": (8, 4)}
 DEFAULT_LAYOUT = "pages"
 DEFAULT_TITLE = "The shelf"
+# the settings page waits on Audiobookshelf, so it gives up sooner than a screen draw
+SETTINGS_ABS_TIMEOUT_S = 5
+
+logger = logging.getLogger(__name__)
 
 
 class TheShelf(BasePlugin):
     def generate_settings_template(self):
         template_params = with_api_key(super().generate_settings_template())
         try:
-            libraries = abs_client(EnvKeys()).libraries()
+            libraries = abs_client(EnvKeys(), timeout=SETTINGS_ABS_TIMEOUT_S).libraries()
             template_params["libraries"] = [
                 {"id": lib.get("id", ""), "name": lib.get("name", "")} for lib in libraries
             ]
@@ -84,5 +90,8 @@ class TheShelf(BasePlugin):
         def record_pages(state):
             state["page_counts"][library_id] = pages
 
-        update_state(record_pages)
+        try:
+            update_state(record_pages)
+        except OSError as e:  # the image is done; only the conductor's page wrap goes stale
+            logger.warning("cannot record the page count of %s: %s", library_id, e)
         return img.convert("RGB")

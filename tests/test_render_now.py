@@ -65,6 +65,24 @@ def test_render_without_narrator_or_series(now_view):
     assert _count(img, (470, 100, 761, 290), GREEN) == 0
 
 
+def _ink_rows(img, box=(470, 100, 761, 290)):
+    x0, y0, x1, y1 = box
+    return {y for y in range(y0, y1) if any(img.getpixel((x, y)) == BLACK for x in range(x0, x1))}
+
+
+def test_blank_author_leaves_no_empty_row(now_view):
+    def render(**fields):
+        nl = dataclasses.replace(now_view.nl, **fields)
+        return render_now_listening(dataclasses.replace(now_view, nl=nl))
+
+    title_only = _ink_rows(render(author="", narrator="", series=""))
+    author_rows = _ink_rows(render(author="Park Saenal", narrator="", series="")) - title_only
+    narrator_rows = _ink_rows(render(author="", narrator="BookTTS AI cast", series="")) - title_only
+    assert author_rows and narrator_rows
+    # the narrator moves up into the author's row: same top within the font size difference
+    assert abs(min(narrator_rows) - min(author_rows)) <= 8
+
+
 def test_series_line_is_blue(now_view):
     nl = dataclasses.replace(now_view.nl, series="Overgeared #1")
     img = render_now_listening(dataclasses.replace(now_view, nl=nl))

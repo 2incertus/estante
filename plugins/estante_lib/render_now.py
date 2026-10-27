@@ -117,7 +117,9 @@ def _draw_text_column(draw, pal, nl, x0, x1, p, fs):
     title_bottom = baseline + (len(lines) - 1) * gap + title_font.getmetrics()[1]
 
     # (text, font, colour, line advance below the previous baseline)
-    rows = [(nl.author, font(SERIF, fs(26)), pal[INK])]
+    rows = []
+    if nl.author:
+        rows.append((nl.author, font(SERIF, fs(26)), pal[INK]))
     if nl.narrator:
         rows.append((f"read by {nl.narrator}", font(SERIF, fs(20)), pal[INK]))
     series = series_line(nl.series)

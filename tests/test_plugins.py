@@ -1,4 +1,6 @@
 """The two InkyPi plugins, called the way InkyPi calls them, against the fixture ABS."""
+import logging
+import os
 from datetime import datetime, timezone
 
 import pytest
@@ -210,3 +212,37 @@ def test_local_year_uses_inkypi_timezone():
     assert datetime.now(tz).utcoffset().total_seconds() == 0
     _, tz = inkypi_glue.local_year(FakeDeviceConfig(timezone="Not/AZone"))
     assert datetime.now(tz).utcoffset().total_seconds() == 0
+
+
+def test_shelf_keeps_its_image_when_state_dir_is_read_only(fake_abs, tmp_state_dir, caplog):
+    shelf = TheShelf({"id": "the_shelf"})
+    settings = {"library_id": AUDIOBOOKS_ID, "layout": "pages"}
+    first = shelf.generate_image(settings, FakeDeviceConfig(abs=fake_abs))
+    caplog.set_level(logging.WARNING)
+    os.chmod(tmp_state_dir, 0o500)
+    try:
+        img = shelf.generate_image(settings, FakeDeviceConfig(abs=fake_abs))
+    finally:
+        os.chmod(tmp_state_dir, 0o700)
+    assert img.tobytes() == first.tobytes()
+    assert "page count" in caplog.text
+
+
+def test_shelf_settings_template_uses_a_short_timeout(fake_abs, tmp_state_dir, monkeypatch):
+    monkeypatch.setattr(inkypi_glue, "load_dotenv", lambda **kw: False)
+    monkeypatch.setenv("ABS_URL", fake_abs.base_url)
+    monkeypatch.setenv("ABS_TOKEN", "TESTTOKEN")
+    made = []
+    real = inkypi_glue.AbsClient
+
+    def recording(*args, **kwargs):
+        client = real(*args, **kwargs)
+        made.append(client)
+        return client
+
+    monkeypatch.setattr(inkypi_glue, "AbsClient", recording)
+    TheShelf({"id": "the_shelf"}).generate_settings_template()
+    assert [c.timeout for c in made] == [5]
+    TheShelf({"id": "the_shelf"}).generate_image({"library_id": AUDIOBOOKS_ID}, FakeDeviceConfig(abs=fake_abs))
+    # drawing a screen keeps the longer default
+    assert made[-1].timeout == 15.0

@@ -1,4 +1,6 @@
+import json
 from datetime import timezone
+from pathlib import Path
 
 from estante_lib.model import (
     STATUS_LISTENING,
@@ -250,3 +252,30 @@ def test_finished_pct_is_full_even_without_duration():
     nl.finished = True
     nl.duration = 0
     assert nl.pct == 1.0
+
+
+PODCAST_ITEM = "58ccf7ab-c342-4e44-90bd-4f8df7819e16"
+
+
+def test_podcast_in_progress_is_skipped(client, fake_abs):
+    in_progress = json.loads((Path(__file__).parent / "fixtures" / "in_progress.json").read_text())
+    podcast = {"id": PODCAST_ITEM, "mediaType": "podcast", "media": {"metadata": {"title": "A show"}}}
+    fake_abs.override("/api/me/items-in-progress", {"libraryItems": [podcast] + in_progress["libraryItems"]})
+    nl = pick_now_listening(client)
+    # jq -r '.libraryItems[0].id' tests/fixtures/in_progress.json
+    assert nl.item_id == OVERGEARED and nl.finished is False
+
+
+def test_finished_podcast_episode_is_not_last_listened(client, fake_abs, me):
+    # me.json holds one podcast episode record:
+    # jq -c '.mediaProgress | map(select(.episodeId != null)) | map(.libraryItemId)' tests/fixtures/me.json
+    records = [dict(p) for p in me["mediaProgress"]]
+    episode = next(p for p in records if p.get("episodeId"))
+    episode.update(isFinished=True, finishedAt=1790000000000, lastUpdate=1790000000000)
+    fake_abs.override("/api/me/items-in-progress", {"libraryItems": [
+        {"id": PODCAST_ITEM, "mediaType": "podcast", "media": {"metadata": {"title": "A show"}}}
+    ]})
+    fake_abs.override("/api/me", {"mediaProgress": records})
+    nl = pick_now_listening(client)
+    # jq -r '.mediaProgress | map(select(.isFinished)) | max_by([.finishedAt, .lastUpdate]) | .libraryItemId' tests/fixtures/me.json
+    assert nl.item_id == SHADOW_SLAVE_1 and nl.finished is True
