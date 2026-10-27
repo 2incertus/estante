@@ -1,0 +1,46 @@
+<div class="form-group">
+    {% if abs_error %}
+    <div class="form-group">
+        <span id="estanteAbsError" style="white-space: normal; flex: 1 1 100%;">Cannot list libraries: {{ abs_error }}</span>
+    </div>
+    {% endif %}
+    <div class="form-group">
+        <label for="estanteLibrary" class="form-label">Library</label>
+        <select id="estanteLibrary" name="library_id" class="form-input" required>
+            {% for library in libraries %}
+            <option value="{{ library.id }}">{{ library.name }}</option>
+            {% else %}
+            <option value="" disabled selected>No libraries to choose from</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="form-group">
+        <label for="estanteLayout" class="form-label">Layout</label>
+        <select id="estanteLayout" name="layout" class="form-input">
+            <option value="pages" selected>Pages of 50 covers</option>
+            <option value="mosaic">Whole library on one screen</option>
+        </select>
+    </div>
+    <div class="form-group">
+        <label for="estanteTitle" class="form-label">Title</label>
+        <input type="text" id="estanteTitle" name="title" placeholder="The shelf" class="form-input">
+    </div>
+</div>
+
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        if (loadPluginSettings) {
+            const library = document.getElementById('estanteLibrary');
+            if (pluginSettings.library_id) {
+                const known = Array.from(library.options).some(o => o.value === pluginSettings.library_id);
+                if (!known) {
+                    // Audiobookshelf is unreachable: keep the saved library so saving does not lose it.
+                    library.add(new Option('Saved library (Audiobookshelf offline)', pluginSettings.library_id));
+                }
+                library.value = pluginSettings.library_id;
+            }
+            document.getElementById('estanteLayout').value = pluginSettings.layout || 'pages';
+            document.getElementById('estanteTitle').value = pluginSettings.title || '';
+        }
+    });
+</script>
