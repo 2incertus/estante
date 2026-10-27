@@ -89,3 +89,40 @@ def now_view(client, tmp_path):
 @pytest.fixture
 def overgeared_view(client, tmp_path):
     return _overgeared_view(client, tmp_path / "covers")
+
+
+AUDIOBOOKS_ID = "b14de8f5-99a5-4cba-b970-6a2cb65f2993"
+LIGHT_NOVELS_ID = "65bcd45d-1cce-496c-950e-4f3aabf5f5eb"
+
+
+def _shelf_view(client, cache_dir, library_id, title, subtitle, n_covers, layout):
+    from estante_lib.model import build_shelf, progress_index
+    from estante_lib.render_shelf import ShelfView
+
+    books = build_shelf(client.library_items(library_id), progress_index(client.me()))
+    covers = {}
+    for book in books[:n_covers]:
+        img = _cover_image(client, cache_dir, book.item_id, book.updated_at, 80)
+        if img is not None:
+            covers[book.item_id] = img
+    return ShelfView(title, subtitle, books, covers, page=0, layout=layout)
+
+
+@pytest.fixture
+def shelf_view(client, tmp_path):
+    """Audiobooks fixture, covers for the first 12 books (all recorded), page 0."""
+    view = _shelf_view(
+        client, tmp_path / "covers", AUDIOBOOKS_ID, "The shelf", "Audiobooks, by author", 12, "pages"
+    )
+    assert len(view.covers) == 12
+    return view
+
+
+@pytest.fixture
+def novels_view(client, tmp_path):
+    """Light novels fixture (597 books), covers for the first 6 (all recorded), mosaic."""
+    view = _shelf_view(
+        client, tmp_path / "covers", LIGHT_NOVELS_ID, "Light novels", "Light Novels, by author", 6, "mosaic"
+    )
+    assert len(view.covers) == 6
+    return view
