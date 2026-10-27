@@ -1,5 +1,5 @@
 {
-  "listen": "0.0.0.0",
+  "listen": "127.0.0.1",
   "port": 8360,
   "inkypi_url": "http://127.0.0.1:80",
   "inkypi_device_json": "/usr/local/inkypi/src/config/device.json",

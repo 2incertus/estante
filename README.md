@@ -34,6 +34,8 @@ Ouvido calls estante-ctl on the Pi. All calls are POST with a 2 second timeout a
 
 Recado never calls Estante; its waiting message reaches the panel through Ouvido's badge call. Ports on the Pi: InkyPi 80, Estante 8360, Ouvido 8600.
 
+estante-ctl listens on 127.0.0.1 by default. Ouvido's container uses host networking, so loopback reaches it, and the routes have no auth, so nothing else on the network should. Widen `listen` (to `0.0.0.0` or the Pi's LAN address) only if a caller on another machine needs it and the network is trusted.
+
 ## Install on the Pi
 
 In this order:
@@ -68,7 +70,7 @@ estante-ctl reads this file (path from `ESTANTE_CONFIG`, set in the service unit
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `listen` | `0.0.0.0` | address estante-ctl listens on |
+| `listen` | `127.0.0.1` | address estante-ctl listens on; loopback is enough for Ouvido (host networking), widen it only for a trusted caller on another machine, as the routes have no auth |
 | `port` | `8360` | its port; Ouvido expects 8360 |
 | `inkypi_url` | `http://127.0.0.1:80` | where InkyPi answers |
 | `inkypi_device_json` | `/usr/local/inkypi/src/config/device.json` | InkyPi's config, read for the playlist's instances |
@@ -100,7 +102,7 @@ NODE_PATH=/home/ubuntu/node_modules node scripts/shoot-inkypi.js   # screenshots
 - The look on the real panel is not verified yet. Every pixel is a driver colour and the driver pass is a no-op in tests, but how Spectra 6 inks read on the shelf has to be checked once the panel arrives.
 - Leave InkyPi's image settings (saturation, contrast, sharpness, brightness) at their defaults. Any other value makes InkyPi blend the image before the driver sees it, and flat areas will dither.
 - InkyPi's own daily playlist tick only matters if estante-ctl is dead; then the screens would rotate once a day.
-- Covers come from Audiobookshelf the first time each shelf page is drawn, and a mosaic pulls the whole library at once. The first pass over both libraries fetches about 900 covers (311 audiobooks and 597 light novels), several minutes over WiFi; after that they come from the cache in `/var/lib/estante/covers`.
+- Covers come from Audiobookshelf the first time each shelf page is drawn, and a mosaic pulls the whole library at once. The first pass over both libraries fetches about 900 covers (311 audiobooks and 597 light novels), several minutes over WiFi; after that they come from the cache in `/var/lib/estante/covers`. estante-ctl waits up to 10 minutes for InkyPi to finish one draw; a first mosaic slower than that counts as a failed draw, and the screen is tried again on its next turn with the covers fetched so far already cached.
 - Estante screens are landscape only; InkyPi's orientation must stay horizontal.
 
 ## License

@@ -1,4 +1,5 @@
 import json
+import logging
 import sys
 import threading
 import time
@@ -470,14 +471,138 @@ def test_unexpected_handler_error_answers_json_500(http, conductor, monkeypatch)
 
 
 def test_wait_for_exit_reports_a_dead_conductor(make_conductor):
-    def broken_factory():
+    def broken_wait():
         raise RuntimeError("boom")
 
     conductor = make_conductor(start=False)
-    conductor.abs_factory = broken_factory
+    conductor._wait_ready = broken_wait
     conductor.start()
     conductor.join(timeout=5)
     assert estante_ctl.wait_for_exit(threading.Event(), conductor, interval=0.05) == 1
     done = threading.Event()
     done.set()
     assert estante_ctl.wait_for_exit(done, conductor, interval=0.05) == 0
+
+
+def _single_screen_playlist(fake, index):
+    data = json.loads(Path(fake.device_json).read_text())
+    playlist = data["playlist_config"]["playlists"][0]
+    playlist["plugins"] = playlist["plugins"][index:index + 1]
+    Path(fake.device_json).write_text(json.dumps(data))
+
+
+def test_single_screen_that_always_fails_backs_off(fake_inkypi, make_conductor, tmp_state):
+    _single_screen_playlist(fake_inkypi, 1)
+    fake_inkypi.fail_next(10**6)
+    conductor = make_conductor()
+    wait_until(lambda: fake_inkypi.failed, 5)
+    started = time.monotonic()
+    wait_until(lambda: not conductor.snapshot()["busy"], 3)
+    first_due = conductor._next_due
+    wait_until(lambda: len(fake_inkypi.failed) >= 3, 8)
+    # two backoffs of min(60 s, 1.2 s rotation) between the first and third attempt, not ticks
+    assert time.monotonic() - started >= 2.0
+    assert conductor.is_alive()
+    wait_until(lambda: not conductor.snapshot()["busy"], 3)
+    assert conductor._next_due > first_due > 0
+    assert fake_inkypi.displays == []
+    assert AUDIOBOOKS_ID not in read_state(str(tmp_state))["pages"]
+
+
+def test_failing_screen_is_skipped_each_cycle(fake_inkypi, make_conductor):
+    fake_inkypi.fail_instances.add("The shelf")
+    conductor = make_conductor()
+    wait_until(lambda: len(fake_inkypi.displays) >= 4, 12)
+    assert fake_inkypi.attempts[:6] == [
+        "Now listening", "The shelf", "Light novels",
+        "Now listening", "The shelf", "Light novels",
+    ]
+    assert names(fake_inkypi)[:4] == ["Now listening", "Light novels", "Now listening", "Light novels"]
+    assert conductor.is_alive()
+
+
+def test_swap_after_a_failure_shows_the_screen_after_it(http, fake_inkypi, conductor):
+    fake_inkypi.fail_instances.add("The shelf")
+    assert http.post("/swap").status == 202
+    wait_until(lambda: fake_inkypi.failed, 3)
+    wait_until(lambda: not conductor.snapshot()["busy"], 3)
+    assert conductor.snapshot()["screen"] == "Now listening"
+    assert http.post("/swap").status == 202
+    wait_until(lambda: len(fake_inkypi.displays) >= 2, 3)
+    assert fake_inkypi.displays[1][2] == "Light novels"
+    assert fake_inkypi.attempts[:3] == ["Now listening", "The shelf", "Light novels"]
+
+
+def test_failed_show_retries_that_screen_on_its_next_turn(fake_inkypi, make_conductor):
+    conductor = make_conductor(rotate_minutes=0.03, poll_minutes=10)
+    wait_until(lambda: fake_inkypi.displays, 5)
+    wait_until(lambda: not conductor.snapshot()["busy"], 3)
+    fake_inkypi.fail_next(1)
+    conductor.request("show", "Light novels")
+    wait_until(lambda: fake_inkypi.failed, 3)
+    wait_until(lambda: len(fake_inkypi.displays) >= 2, 5)
+    assert fake_inkypi.attempts[:3] == ["Now listening", "Light novels", "Light novels"]
+    assert names(fake_inkypi)[:2] == ["Now listening", "Light novels"]
+
+
+def test_failed_shelf_show_keeps_the_page(fake_inkypi, tmp_state, make_conductor):
+    write_state({"page_counts": {AUDIOBOOKS_ID: 7}, "pages": {AUDIOBOOKS_ID: 3}}, str(tmp_state))
+    conductor = make_conductor(rotate_minutes=10, poll_minutes=10)
+    wait_until(lambda: fake_inkypi.displays, 5)
+    wait_until(lambda: not conductor.snapshot()["busy"], 3)
+    for screen in ("The shelf", "Light novels"):
+        count = len(fake_inkypi.failed)
+        fake_inkypi.fail_next(1)
+        conductor.request("show", screen)
+        wait_until(lambda: len(fake_inkypi.failed) > count, 3)
+        wait_until(lambda: not conductor.snapshot()["busy"], 3)
+    pages = read_state(str(tmp_state))["pages"]
+    assert pages == {AUDIOBOOKS_ID: 3}
+    conductor.request("show", "The shelf")
+    wait_until(lambda: len(fake_inkypi.displays) >= 2, 3)
+    assert read_state(str(tmp_state))["pages"][AUDIOBOOKS_ID] == 4
+
+
+def test_page_advance_error_neither_blocks_nor_refires(fake_inkypi, make_conductor):
+    conductor = make_conductor(start=False)
+    busy_at_advance = []
+
+    def broken_advance(screen):
+        busy_at_advance.append(conductor._busy)
+        raise OSError("read-only state dir")
+
+    conductor._advance_page = broken_advance
+    conductor.start()
+    wait_until(lambda: len(fake_inkypi.displays) >= 3, 8)
+    assert names(fake_inkypi)[:3] == ["Now listening", "The shelf", "Light novels"]
+    assert busy_at_advance and all(busy_at_advance)
+    # one advance attempt per shelf show, not one per tick
+    assert len(busy_at_advance) <= 3
+
+
+def test_abs_credentials_are_read_lazily(fake_inkypi, fake_abs, make_conductor, caplog):
+    caplog.set_level(logging.INFO, logger="estante-ctl")
+    creds = {"ok": False}
+    conductor = make_conductor(start=False, rotate_minutes=10, poll_minutes=0.01, min_redraw_minutes=0)
+
+    def factory():
+        return AbsClient(fake_abs.base_url, "TESTTOKEN", timeout=5) if creds["ok"] else None
+
+    conductor.abs_factory = factory
+    conductor.start()
+    wait_until(lambda: fake_inkypi.displays, 5)
+    time.sleep(1.5)
+    assert len(fake_inkypi.displays) == 1
+    disabled = [r for r in caplog.records if "watch disabled" in r.getMessage()]
+    assert len(disabled) == 1
+    creds["ok"] = True
+    wait_until(lambda: len(fake_inkypi.displays) >= 2, 4)
+    assert names(fake_inkypi)[:2] == ["Now listening", "Now listening"]
+    enabled = [r for r in caplog.records if "watch enabled" in r.getMessage()]
+    assert len(enabled) == 1
+
+
+def test_display_timeout_and_listen_default():
+    # a cold mosaic render fetches up to 900 covers before InkyPi answers
+    assert estante_ctl.DISPLAY_TIMEOUT_S == 600
+    assert estante_ctl.DEFAULTS["listen"] == "127.0.0.1"

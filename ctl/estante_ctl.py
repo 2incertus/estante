@@ -30,7 +30,7 @@ from estante_lib.state import normalize_badge, read_state, update_state  # noqa:
 log = logging.getLogger("estante-ctl")
 
 DEFAULTS = {
-    "listen": "0.0.0.0",
+    "listen": "127.0.0.1",
     "port": 8360,
     "inkypi_url": "http://127.0.0.1:80",
     "inkypi_device_json": "/usr/local/inkypi/src/config/device.json",
@@ -50,7 +50,8 @@ READY_RETRY_S = 5
 READY_LOG_S = 60
 SCREENS_RETRY_S = 30
 FAILED_DISPLAY_RETRY_S = 60
-DISPLAY_TIMEOUT_S = 120
+# a cold mosaic render fetches up to 900 covers before InkyPi answers
+DISPLAY_TIMEOUT_S = 600
 
 
 def load_config(path=None):
@@ -203,6 +204,8 @@ class Conductor(threading.Thread):
         self._stop_event = threading.Event()
         self._screens = []
         self._current = None
+        # the rotation's last attempted screen: the next turn and /swap go one past it
+        self._cursor = None
         self._pending = None
         self._busy = False
         self._next_due = None
@@ -210,6 +213,7 @@ class Conductor(threading.Thread):
         self._nl_key = None
         self._nl_shown_at = None
         self._abs = None
+        self._abs_enabled = None
         self._booted = False
 
     # public API, called from HTTP threads
@@ -296,12 +300,37 @@ class Conductor(threading.Thread):
             return
         with self._lock:
             name = self._screens[self._current].name if self._current is not None else None
+            cursor = self._screens[self._cursor].name if self._cursor is not None else None
             self._screens = fresh
             names = [s.name for s in fresh]
             self._current = names.index(name) if name in names else None
+            if cursor in names:
+                self._cursor = names.index(cursor)
+            else:
+                self._cursor = self._current
+
+    def _current_abs(self):
+        """A fresh ABS client from InkyPi's .env, so a key edited after boot is picked up."""
+        try:
+            client = self.abs_factory()
+        except Exception as e:  # a broken .env only disables the watch
+            log.warning("cannot build the ABS client: %s", e)
+            client = None
+        enabled = client is not None
+        if enabled != self._abs_enabled:
+            if enabled:
+                log.info("ABS credentials found: Now-listening watch enabled")
+            else:
+                log.info(
+                    "ABS_URL or ABS_TOKEN missing in %s: Now-listening watch disabled",
+                    self.cfg["inkypi_env"],
+                )
+            self._abs_enabled = enabled
+        self._abs = client
+        return client
 
     def _now_listening_key(self):
-        if self._abs is None:
+        if self._current_abs() is None:
             return None
         badge = read_state(self.state_path).get("badge")
         try:
@@ -311,13 +340,16 @@ class Conductor(threading.Thread):
             return None
 
     def _advance_page(self, screen):
+        """Turn the shelf page; returns a function that turns it back, or None."""
         lib = screen.settings.get("library_id")
         if not lib:
-            return
+            return None
+        before = {}
 
         def mutate(state):
             pages = state.setdefault("pages", {})
             if lib in pages:
+                before["page"] = pages[lib]
                 total = max(1, int(state.get("page_counts", {}).get(lib, 1) or 1))
                 pages[lib] = (int(pages[lib]) + 1) % total
             else:
@@ -325,44 +357,73 @@ class Conductor(threading.Thread):
 
         update_state(mutate, self.state_path)
 
-    def _show(self, index, advance):
+        def restore(state):
+            pages = state.setdefault("pages", {})
+            if "page" in before:
+                pages[lib] = before["page"]
+            else:
+                pages.pop(lib, None)
+
+        return lambda: update_state(restore, self.state_path)
+
+    def _show(self, index, advance, retry=False):
+        """Display screen `index`. On failure the rotation backs off and moves past it,
+        or, with `retry` (a /show or the first screen), comes back to it next turn."""
+        # busy is set before any state or ABS work and stays True until the
+        # bookkeeping is done, so a reader that sees busy False also sees the
+        # new screen and next rotation
         with self._lock:
             screen = self._screens[index]
-        if advance and screen.plugin_id == THE_SHELF:
-            self._advance_page(screen)
-        key = self._now_listening_key() if screen.plugin_id == NOW_LISTENING else None
-        with self._lock:
             self._busy = True
+        ok = False
+        undo = None
         try:
-            # busy stays True until the bookkeeping is done, so a reader that
-            # sees busy False also sees the new screen and next rotation
-            return self._display_and_record(index, screen, key)
+            if advance and screen.plugin_id == THE_SHELF:
+                try:
+                    undo = self._advance_page(screen)
+                except Exception as e:  # the page just does not turn
+                    log.warning("cannot turn the page of %s: %s", screen.name, e)
+            key = self._now_listening_key() if screen.plugin_id == NOW_LISTENING else None
+            ok = self._display_and_record(index, screen, key)
         except Exception:
             log.exception("showing %s failed", screen.name)
-            with self._lock:
-                self._next_due = self.clock() + min(FAILED_DISPLAY_RETRY_S, self.cfg["rotate_minutes"] * 60)
-            return False
         finally:
+            if not ok:
+                self._failed(index, retry, undo)
             with self._lock:
                 self._busy = False
+        return ok
+
+    def _failed(self, index, retry, undo):
+        if undo is not None:
+            try:
+                undo()  # the panel did not change, so neither does the page
+            except Exception as e:
+                log.warning("cannot turn the page back: %s", e)
+        with self._lock:
+            self._next_due = self.clock() + min(FAILED_DISPLAY_RETRY_S, self.cfg["rotate_minutes"] * 60)
+            n = len(self._screens)
+            self._cursor = (index - 1) % n if retry else index
 
     def _display_and_record(self, index, screen, key):
         ok = self.inkypi.display(self.cfg["playlist"], screen.plugin_id, screen.name)
-        now = self.clock()
         if not ok:
-            with self._lock:
-                self._next_due = now + min(FAILED_DISPLAY_RETRY_S, self.cfg["rotate_minutes"] * 60)
             return False
-        record = {"screen": screen.name, "plugin_id": screen.plugin_id, "at": now_iso()}
-        update_state(lambda state: state.__setitem__("display", record), self.state_path)
+        now = self.clock()
         log.info("showing %s", screen.name)
         with self._lock:
             self._current = index
+            self._cursor = index
             self._next_due = now + self.cfg["rotate_minutes"] * 60
             if screen.plugin_id == NOW_LISTENING:
                 self._nl_key = key
                 self._nl_shown_at = now
                 self._next_poll = now + self.cfg["poll_minutes"] * 60
+        record = {"screen": screen.name, "plugin_id": screen.plugin_id, "at": now_iso()}
+        try:
+            update_state(lambda state: state.__setitem__("display", record), self.state_path)
+        except Exception as e:  # the panel did change; only /state's last_display is stale
+            log.warning("cannot record the display: %s", e)
         return True
 
     def _wait_ready(self):
@@ -390,7 +451,7 @@ class Conductor(threading.Thread):
     def _next_index(self):
         with self._lock:
             n = len(self._screens)
-            return 0 if self._current is None else (self._current + 1) % n
+            return 0 if self._cursor is None else (self._cursor + 1) % n
 
     def _run_pending(self, action, name):
         if action in ("swap", "show"):
@@ -404,12 +465,12 @@ class Conductor(threading.Thread):
             if name not in names:
                 log.warning("screen %s is gone from the playlist", name)
                 return
-            self._show(names.index(name), advance=True)
+            self._show(names.index(name), advance=True, retry=True)
             return
         with self._lock:
             index = self._current
         if index is None:
-            self._show(0, advance=True)
+            self._show(0, advance=True, retry=True)
         else:
             self._show(index, advance=False)
 
@@ -432,7 +493,7 @@ class Conductor(threading.Thread):
             self._booted = True
             if self._pending is not None and self._pending[0] == "redraw":
                 self._pending = None
-        self._show(0, advance=True)
+        self._show(0, advance=True, retry=True)
 
     def _tick(self):
         if not self._booted:
@@ -449,8 +510,7 @@ class Conductor(threading.Thread):
             self._refresh_screens()
             self._show(self._next_index(), advance=True)
         elif (
-            self._abs is not None
-            and current is not None
+            current is not None
             and current.plugin_id == NOW_LISTENING
             and (next_poll is None or now >= next_poll)
         ):
@@ -463,9 +523,7 @@ class Conductor(threading.Thread):
             log.exception("conductor crashed")
 
     def _run(self):
-        self._abs = self.abs_factory()
-        if self._abs is None:
-            log.info("ABS_URL or ABS_TOKEN missing in %s: Now-listening watch disabled", self.cfg["inkypi_env"])
+        self._current_abs()
         if not self._wait_ready() or not self._wait_screens():
             return
         while not self._stop_event.is_set():

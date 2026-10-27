@@ -53,6 +53,8 @@ class FakeInkyPi:
         self._fail_left = 0
         self._malformed_left = 0
         self.malformed = []
+        self.fail_instances = set()
+        self.attempts = []
         self._lock = threading.Lock()
         self._tmp = None
         self._server = None
@@ -132,9 +134,11 @@ class FakeInkyPi:
                 req.close_connection = True
                 return
             with self._lock:
+                self.attempts.append(entry[2])
                 fail = self._fail_left > 0
                 if fail:
                     self._fail_left -= 1
+                fail = fail or entry[2] in self.fail_instances
             if fail:
                 self.failed.append(entry)
                 self._reply(req, 500, {"error": "simulated failure"})
