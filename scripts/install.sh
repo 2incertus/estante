@@ -54,6 +54,57 @@ step() {
     echo "== $1"
 }
 
+# Add KEY=VALUE to an env file unless KEY already has a value; an empty KEY= line
+# is dropped and written again with the value.
+ensure_env_key() {
+    local file="$1"
+    local key="$2"
+    local value="$3"
+    if grep -q "^$key=[^[:space:]]" "$file"; then
+        echo "$key already set, left as is"
+        return 0
+    fi
+    if grep -q "^$key=" "$file"; then
+        sed -i "/^$key=[[:space:]]*\$/d" "$file"
+    fi
+    # A hand-edited .env may lack its final newline; do not glue onto its last line.
+    if [ -n "$(tail -c 1 "$file")" ]; then
+        echo >> "$file"
+    fi
+    echo "$key=$value" >> "$file"
+    echo "$key added"
+}
+
+# The fields of InkyPi's settings form, one name=value per line: what device.json holds
+# now, the plugin cycle at 24 hours, and the four image enhancements at a neutral 1.0
+# (any other value blends the image before the driver sees it, so flat areas dither).
+settings_fields() {
+    local device_json="$1"
+    local tz="$2"
+    jq -r --arg tz "$tz" '
+        (.image_settings // {}) as $img
+        | ["deviceName=\(.name // "InkyPi")",
+           "orientation=\(.orientation // "horizontal")",
+           "timezoneName=\(.timezone // $tz)",
+           "timeFormat=\(.time_format // "12h")",
+           "unit=hour",
+           "interval=24",
+           "saturation=1.0",
+           "contrast=1.0",
+           "sharpness=1.0",
+           "brightness=1.0"]
+        + (if .inverted_image then ["invertImage=on"] else [] end)
+        + (if .log_system_stats then ["logSystemStats=on"] else [] end)
+        + (if (.display_type // "inky") == "inky"
+           then ["inky_saturation=\($img.inky_saturation // 0.5)"] else [] end)
+        | .[]' "$device_json"
+}
+
+# tests load the helpers above without running the installer
+if [ "${ESTANTE_INSTALL_FUNCTIONS_ONLY:-}" = "1" ]; then
+    return 0 2> /dev/null || exit 0
+fi
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --abs-url|--abs-token|--inkypi|--audiobooks-id|--novels-id)
@@ -140,19 +191,8 @@ EOF
     step "3. Audiobookshelf credentials in $ENV_FILE"
     touch "$ENV_FILE"
     chmod 600 "$ENV_FILE"
-    for pair in "ABS_URL=$ABS_URL" "ABS_TOKEN=$ABS_TOKEN"; do
-        key="${pair%%=*}"
-        if grep -q "^$key=" "$ENV_FILE"; then
-            echo "$key already set, left as is"
-        else
-            # A hand-edited .env may lack its final newline; do not glue onto its last line.
-            if [ -n "$(tail -c 1 "$ENV_FILE")" ]; then
-                echo >> "$ENV_FILE"
-            fi
-            echo "$pair" >> "$ENV_FILE"
-            echo "$key added"
-        fi
-    done
+    ensure_env_key "$ENV_FILE" ABS_URL "$ABS_URL"
+    ensure_env_key "$ENV_FILE" ABS_TOKEN "$ABS_TOKEN"
 
     # ---- 4. state dir and estante.json
     step "4. /var/lib/estante and /etc/estante/estante.json"
@@ -181,32 +221,17 @@ fi
 # ---- 6. park InkyPi's own playlist cycle at its maximum, 24 hours
 step "6. InkyPi plugin cycle interval: 24 hours"
 # The settings form posts every field, so send back what is configured now and change
-# only the interval. estante-ctl's display calls reset InkyPi's timer, so this cycle
-# only fires if estante-ctl is not running.
+# only the interval and the image enhancements. estante-ctl's display calls reset
+# InkyPi's timer, so this cycle only fires if estante-ctl is not running.
 system_tz="$(timedatectl show -p Timezone --value 2> /dev/null || true)"
 settings_args=()
 while IFS= read -r field; do
     settings_args+=(--data-urlencode "$field")
-done < <(jq -r --arg tz "${system_tz:-UTC}" '
-    (.image_settings // {}) as $img
-    | ["deviceName=\(.name // "InkyPi")",
-       "orientation=\(.orientation // "horizontal")",
-       "timezoneName=\(.timezone // $tz)",
-       "timeFormat=\(.time_format // "12h")",
-       "unit=hour",
-       "interval=24",
-       "saturation=\($img.saturation // 1.0)",
-       "contrast=\($img.contrast // 1.0)",
-       "sharpness=\($img.sharpness // 1.0)",
-       "brightness=\($img.brightness // 1.0)"]
-    + (if .inverted_image then ["invertImage=on"] else [] end)
-    + (if .log_system_stats then ["logSystemStats=on"] else [] end)
-    + (if (.display_type // "inky") == "inky"
-       then ["inky_saturation=\($img.inky_saturation // 0.5)"] else [] end)
-    | .[]' "$DEVICE_JSON")
+done < <(settings_fields "$DEVICE_JSON" "${system_tz:-UTC}")
 reply="$(curl -s --max-time 30 -X POST "$INKYPI_URL/save_settings" "${settings_args[@]}")"
 echo "$reply" | jq -e '.success == true' > /dev/null || die "save_settings failed: $reply"
 echo "saved (plugin_cycle_interval_seconds 86400)"
+echo "image saturation, contrast, sharpness and brightness set to 1.0 so flat areas do not dither"
 
 # ---- 7. the three playlist instances
 step "7. playlist \"$PLAYLIST\": Now listening, The shelf, Light novels"
@@ -290,7 +315,7 @@ echo "estante-ctl is up: $(curl -s --max-time 5 "$CTL_URL/state")"
 
 # ---- 9. self-test with InkyPi's Pillow
 step "9. self-test"
-if "$INKYPI/venv_inkypi/bin/python" "$REPO/scripts/selftest.py"; then
+if INKYPI="$INKYPI" "$INKYPI/venv_inkypi/bin/python" "$REPO/scripts/selftest.py"; then
     echo
     echo "Estante is installed. Buttons arrive from Ouvido at $CTL_URL (swap, show, badge)."
 else

@@ -6,12 +6,15 @@ ryzen). Serves tests/fixtures through the local fake Audiobookshelf, renders Now
 listening, a page of the shelf and the light-novel mosaic, and checks each is 800x480,
 uses only ink indexes 0..5 and passes through the inky driver's quantize unchanged.
 Never touches the panel or the network beyond 127.0.0.1. Prints `selftest: ok` and
-exits 0, or prints the first failure and exits 1.
+exits 0, or prints the first failure and exits 1. Also warns (without failing) when
+InkyPi's device.json ($INKYPI/src/config/device.json, INKYPI defaults to
+/usr/local/inkypi) holds an image enhancement other than 1.0.
 
 Usage:
     python3 scripts/selftest.py [--fixtures DIR]
 """
 import argparse
+import json
 import os
 import sys
 import tempfile
@@ -25,6 +28,7 @@ sys.path.insert(0, os.path.join(REPO, "tests"))
 AUDIOBOOKS_ID = "b14de8f5-99a5-4cba-b970-6a2cb65f2993"
 LIGHT_NOVELS_ID = "65bcd45d-1cce-496c-950e-4f3aabf5f5eb"
 SIZE = (800, 480)
+NEUTRAL_IMAGE_SETTINGS = ("saturation", "contrast", "sharpness", "brightness")
 
 
 def _open(path):
@@ -89,6 +93,31 @@ def check(name, img):
         raise AssertionError(f"{name}: the inky driver pass would change pixels")
 
 
+def image_settings_warning(inkypi_dir):
+    """A warning line when InkyPi's image enhancements are not neutral, else None."""
+    path = os.path.join(inkypi_dir, "src", "config", "device.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            settings = (json.load(f) or {}).get("image_settings") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    off = []
+    for name in NEUTRAL_IMAGE_SETTINGS:
+        value = settings.get(name, 1.0)
+        try:
+            neutral = float(value) == 1.0
+        except (TypeError, ValueError):
+            neutral = False
+        if not neutral:
+            off.append(f"{name} {value}")
+    if not off:
+        return None
+    return (
+        f"selftest: warning: InkyPi image settings in {path} are not 1.0 ({', '.join(off)}); "
+        "flat areas will dither on the panel"
+    )
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--fixtures", default=os.path.join(REPO, "tests", "fixtures"))
@@ -101,6 +130,9 @@ def main(argv=None):
             check(name, img)
             names.append(name)
         print(f"rendered {', '.join(names)} with Pillow {PIL.__version__}")
+        warning = image_settings_warning(os.environ.get("INKYPI") or "/usr/local/inkypi")
+        if warning:
+            print(warning)
     except Exception as e:  # report the first failure of any kind, then exit 1
         if os.environ.get("ESTANTE_SELFTEST_TRACE"):
             traceback.print_exc()

@@ -100,7 +100,7 @@ NODE_PATH=/home/ubuntu/node_modules node scripts/shoot-inkypi.js   # screenshots
 ## Known limits
 
 - The look on the real panel is not verified yet. Every pixel is a driver colour and the driver pass is a no-op in tests, but how Spectra 6 inks read on the shelf has to be checked once the panel arrives.
-- Leave InkyPi's image settings (saturation, contrast, sharpness, brightness) at their defaults. Any other value makes InkyPi blend the image before the driver sees it, and flat areas will dither.
+- Leave InkyPi's image settings (saturation, contrast, sharpness, brightness) at 1.0. Any other value makes InkyPi blend the image before the driver sees it, and flat areas will dither. The installer sets all four to 1.0 when it saves InkyPi's settings, and the self-test prints a warning if any has drifted since.
 - InkyPi's own daily playlist tick only matters if estante-ctl is dead; then the screens would rotate once a day.
 - Covers come from Audiobookshelf the first time each shelf page is drawn, and a mosaic pulls the whole library at once. The first pass over both libraries fetches about 900 covers (311 audiobooks and 597 light novels), several minutes over WiFi; after that they come from the cache in `/var/lib/estante/covers`. estante-ctl waits up to 10 minutes for InkyPi to finish one draw; a first mosaic slower than that counts as a failed draw, and the screen is tried again on its next turn with the covers fetched so far already cached.
 - Estante screens are landscape only; InkyPi's orientation must stay horizontal.

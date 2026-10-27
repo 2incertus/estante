@@ -1,4 +1,6 @@
 """scripts/selftest.py renders the fixture screens and checks the driver pass is a no-op."""
+import json
+import os
 import subprocess
 import sys
 
@@ -7,9 +9,11 @@ from conftest import REPO
 SELFTEST = REPO / "scripts" / "selftest.py"
 
 
-def _run(*args):
+def _run(*args, inkypi=None):
+    env = dict(os.environ)
+    env["INKYPI"] = str(inkypi) if inkypi else "/nonexistent-inkypi"
     return subprocess.run(
-        [sys.executable, str(SELFTEST), *args], capture_output=True, text=True, timeout=60
+        [sys.executable, str(SELFTEST), *args], capture_output=True, text=True, timeout=60, env=env
     )
 
 
@@ -43,3 +47,24 @@ def test_check_rejects_stray_indexes_and_wrong_size():
 
     with pytest.raises(AssertionError, match="size"):
         selftest.check("small", Image.new("P", (400, 240), 1))
+
+
+def test_selftest_warns_on_non_neutral_image_settings(tmp_path):
+    config = tmp_path / "src" / "config"
+    config.mkdir(parents=True)
+    (config / "device.json").write_text(json.dumps({"image_settings": {
+        "saturation": 1.4, "contrast": 1.0, "sharpness": 1.0, "brightness": 1, "inky_saturation": 0.5,
+    }}))
+    result = _run(inkypi=tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = result.stdout.strip().splitlines()
+    assert lines[-1] == "selftest: ok"
+    warnings = [line for line in lines if line.startswith("selftest: warning")]
+    assert len(warnings) == 1 and "saturation 1.4" in warnings[0]
+    assert "contrast" not in warnings[0] and "brightness" not in warnings[0]
+
+
+def test_selftest_quiet_without_device_json(tmp_path):
+    result = _run(inkypi=tmp_path)
+    assert result.returncode == 0
+    assert "warning" not in result.stdout
