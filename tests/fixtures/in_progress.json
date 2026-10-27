@@ -1,0 +1,164 @@
+{
+ "libraryItems": [
+  {
+   "id": "4aa1594d-b6ce-441f-9ab3-951ff1340009",
+   "oldLibraryItemId": null,
+   "libraryId": "b14de8f5-99a5-4cba-b970-6a2cb65f2993",
+   "isFile": false,
+   "mtimeMs": 1793088604331,
+   "ctimeMs": 1793088604331,
+   "birthtimeMs": 1792660202652,
+   "addedAt": 1792678211277,
+   "updatedAt": 1793088718748,
+   "isMissing": false,
+   "isInvalid": false,
+   "mediaType": "book",
+   "media": {
+    "id": "1458f3e2-8958-40ae-9c4b-ba63d7fa7044",
+    "metadata": {
+     "title": "Overgeared",
+     "titleIgnorePrefix": "Overgeared",
+     "subtitle": null,
+     "authorName": "Park Saenal",
+     "authorNameLF": "Saenal, Park",
+     "narratorName": "BookTTS AI cast",
+     "seriesName": "",
+     "genres": [
+      "Fantasy",
+      "LitRPG",
+      "Action",
+      "Adventure",
+      "Comedy"
+     ],
+     "publishedYear": "2014",
+     "publishedDate": null,
+     "publisher": "Wuxiaworld (English translation)",
+     "isbn": null,
+     "asin": null,
+     "language": "English",
+     "explicit": false,
+     "abridged": false
+    },
+    "coverPath": "/audiobooks/Park Saenal/Overgeared/cover.jpg",
+    "tags": [
+     "AI narrated",
+     "Korean web novel"
+    ],
+    "numTracks": 9,
+    "numAudioFiles": 9,
+    "numChapters": 820,
+    "duration": 583287.581035,
+    "size": 8445045186,
+    "ebookFormat": "epub"
+   },
+   "numFiles": 12,
+   "size": 8445735482,
+   "progressLastUpdate": 1793073716202
+  },
+  {
+   "id": "f523b4c6-35f4-40f6-aa41-0da94ce71896",
+   "oldLibraryItemId": null,
+   "libraryId": "b14de8f5-99a5-4cba-b970-6a2cb65f2993",
+   "isFile": false,
+   "mtimeMs": 1765187444540,
+   "ctimeMs": 1778532926873,
+   "birthtimeMs": 1778517911284,
+   "addedAt": 1765187675472,
+   "updatedAt": 1778545555592,
+   "isMissing": false,
+   "isInvalid": false,
+   "mediaType": "book",
+   "media": {
+    "id": "8734de99-d398-42af-9064-f39dfd55cfc7",
+    "metadata": {
+     "title": "Shadow Slave 5",
+     "titleIgnorePrefix": "Shadow Slave 5",
+     "subtitle": "Webnovel - Volume 5",
+     "authorName": "Guiltythree",
+     "authorNameLF": "Guiltythree",
+     "narratorName": "Reagan Boggs",
+     "seriesName": "A Slave of the Shadows #5",
+     "genres": [
+      "Fiction"
+     ],
+     "publishedYear": "2019",
+     "publishedDate": null,
+     "publisher": "webnovel",
+     "isbn": null,
+     "asin": "B0CCVR42GN",
+     "language": "English",
+     "explicit": false,
+     "abridged": false
+    },
+    "coverPath": "/audiobooks/Shadow Slave_ Book5/cover.jpg",
+    "tags": [
+     "Historical Fiction"
+    ],
+    "numTracks": 171,
+    "numAudioFiles": 171,
+    "numChapters": 171,
+    "duration": 154204.78693600005,
+    "size": 2121909928
+   },
+   "numFiles": 173,
+   "size": 2121941356,
+   "progressLastUpdate": 1793060854524
+  },
+  {
+   "id": "616bf0b9-2c0c-472a-b975-72f35077d199",
+   "oldLibraryItemId": null,
+   "libraryId": "b14de8f5-99a5-4cba-b970-6a2cb65f2993",
+   "isFile": false,
+   "mtimeMs": 1780893574167,
+   "ctimeMs": 1780893574167,
+   "birthtimeMs": 1778517911277,
+   "addedAt": 1765184326340,
+   "updatedAt": 1780948485055,
+   "isMissing": false,
+   "isInvalid": false,
+   "mediaType": "book",
+   "media": {
+    "id": "2f714a18-7394-44cf-9690-adfa0cadbd59",
+    "metadata": {
+     "title": "Jade City",
+     "titleIgnorePrefix": "Jade City",
+     "subtitle": "The Green Bone Saga, Book 1",
+     "authorName": "Fonda Lee",
+     "authorNameLF": "Lee, Fonda",
+     "narratorName": "Andrew Kishino",
+     "seriesName": "The Green Bone Saga #1",
+     "genres": [
+      "Fiction"
+     ],
+     "publishedYear": "2017",
+     "publishedDate": null,
+     "publisher": "Orbit",
+     "isbn": "9780316440899",
+     "asin": "B0771W7K2Z",
+     "language": "English",
+     "explicit": false,
+     "abridged": false
+    },
+    "coverPath": "/audiobooks/Jade City/cover.jpg",
+    "tags": [
+     "Thriller & Suspense",
+     "Crime Thrillers",
+     "Fantasy",
+     "Action & Adventure",
+     "Epic",
+     "Historical",
+     "Paranormal & Urban",
+     "Urban"
+    ],
+    "numTracks": 61,
+    "numAudioFiles": 61,
+    "numChapters": 61,
+    "duration": 68839.08498600005,
+    "size": 835852777
+   },
+   "numFiles": 63,
+   "size": 836483277,
+   "progressLastUpdate": 1792966657307
+  }
+ ]
+}

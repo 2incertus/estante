@@ -1,0 +1,431 @@
+{
+ "id": "616bf0b9-2c0c-472a-b975-72f35077d199",
+ "oldLibraryItemId": null,
+ "libraryId": "b14de8f5-99a5-4cba-b970-6a2cb65f2993",
+ "isFile": false,
+ "mtimeMs": 1780893574167,
+ "ctimeMs": 1780893574167,
+ "birthtimeMs": 1778517911277,
+ "addedAt": 1765184326340,
+ "updatedAt": 1780948485055,
+ "lastScan": 1780948485055,
+ "scanVersion": "2.32.1",
+ "isMissing": false,
+ "isInvalid": false,
+ "mediaType": "book",
+ "media": {
+  "id": "2f714a18-7394-44cf-9690-adfa0cadbd59",
+  "libraryItemId": "616bf0b9-2c0c-472a-b975-72f35077d199",
+  "metadata": {
+   "title": "Jade City",
+   "subtitle": "The Green Bone Saga, Book 1",
+   "authors": [
+    {
+     "id": "5401c315-cb47-48a3-bbd4-e08e458c081b",
+     "name": "Fonda Lee"
+    }
+   ],
+   "narrators": [
+    "Andrew Kishino"
+   ],
+   "series": [
+    {
+     "id": "ad1dfe7c-8cb9-43e6-a99f-f7966932b228",
+     "name": "The Green Bone Saga",
+     "sequence": "1"
+    }
+   ],
+   "genres": [
+    "Fiction"
+   ],
+   "publishedYear": "2017",
+   "publishedDate": null,
+   "publisher": "Orbit",
+   "isbn": "9780316440899",
+   "asin": "B0771W7K2Z",
+   "language": "English",
+   "explicit": false,
+   "abridged": false
+  },
+  "coverPath": "/audiobooks/Jade City/cover.jpg",
+  "tags": [
+   "Thriller & Suspense",
+   "Crime Thrillers",
+   "Fantasy",
+   "Action & Adventure",
+   "Epic",
+   "Historical",
+   "Paranormal & Urban",
+   "Urban"
+  ],
+  "chapters": [
+   {
+    "id": 0,
+    "start": 0,
+    "end": 1246.798367,
+    "title": "Chapter 001"
+   },
+   {
+    "id": 1,
+    "start": 1246.798367,
+    "end": 2580.558367,
+    "title": "Chapter 002"
+   },
+   {
+    "id": 2,
+    "start": 2580.558367,
+    "end": 4245.995102,
+    "title": "Chapter 003"
+   },
+   {
+    "id": 3,
+    "start": 4245.995102,
+    "end": 5566.249796,
+    "title": "Chapter 004"
+   },
+   {
+    "id": 4,
+    "start": 5566.249796,
+    "end": 6714.540408,
+    "title": "Chapter 005"
+   },
+   {
+    "id": 5,
+    "start": 6714.540408,
+    "end": 8608.653060999999,
+    "title": "Chapter 006"
+   },
+   {
+    "id": 6,
+    "start": 8608.653060999999,
+    "end": 10533.616326,
+    "title": "Chapter 007"
+   },
+   {
+    "id": 7,
+    "start": 10533.616326,
+    "end": 11938.847345999999,
+    "title": "Chapter 008"
+   },
+   {
+    "id": 8,
+    "start": 11938.847345999999,
+    "end": 12636.891427999999,
+    "title": "Chapter 009"
+   },
+   {
+    "id": 9,
+    "start": 12636.891427999999,
+    "end": 14204.708571,
+    "title": "Chapter 010"
+   },
+   {
+    "id": 10,
+    "start": 14204.708571,
+    "end": 15578.88,
+    "title": "Chapter 011"
+   },
+   {
+    "id": 11,
+    "start": 15578.88,
+    "end": 15816.202448999999,
+    "title": "Chapter 012"
+   },
+   {
+    "id": 12,
+    "start": 15816.202448999999,
+    "end": 16496.796735,
+    "title": "Chapter 013"
+   },
+   {
+    "id": 13,
+    "start": 16496.796735,
+    "end": 18027.337143,
+    "title": "Chapter 014"
+   },
+   {
+    "id": 14,
+    "start": 18027.337143,
+    "end": 18697.377959,
+    "title": "Chapter 015"
+   },
+   {
+    "id": 15,
+    "start": 18697.377959,
+    "end": 19960.189388000003,
+    "title": "Chapter 016"
+   },
+   {
+    "id": 16,
+    "start": 19960.189388000003,
+    "end": 20973.662041000003,
+    "title": "Chapter 017"
+   },
+   {
+    "id": 17,
+    "start": 20973.662041000003,
+    "end": 21161.717551,
+    "title": "Chapter 018"
+   },
+   {
+    "id": 18,
+    "start": 21161.717551,
+    "end": 21987.996735,
+    "title": "Chapter 019"
+   },
+   {
+    "id": 19,
+    "start": 21987.996735,
+    "end": 23027.983674,
+    "title": "Chapter 020"
+   },
+   {
+    "id": 20,
+    "start": 23027.983674,
+    "end": 24385.201633,
+    "title": "Chapter 021"
+   },
+   {
+    "id": 21,
+    "start": 24385.201633,
+    "end": 25286.478368,
+    "title": "Chapter 022"
+   },
+   {
+    "id": 22,
+    "start": 25286.478368,
+    "end": 26318.106123,
+    "title": "Chapter 023"
+   },
+   {
+    "id": 23,
+    "start": 26318.106123,
+    "end": 27067.846531000003,
+    "title": "Chapter 024"
+   },
+   {
+    "id": 24,
+    "start": 27067.846531000003,
+    "end": 28602.435919000003,
+    "title": "Chapter 025"
+   },
+   {
+    "id": 25,
+    "start": 28602.435919000003,
+    "end": 29506.638368000004,
+    "title": "Chapter 026"
+   },
+   {
+    "id": 26,
+    "start": 29506.638368000004,
+    "end": 30726.295511000004,
+    "title": "Chapter 027"
+   },
+   {
+    "id": 27,
+    "start": 30726.295511000004,
+    "end": 32198.870205000003,
+    "title": "Chapter 028"
+   },
+   {
+    "id": 28,
+    "start": 32198.870205000003,
+    "end": 34161.711021,
+    "title": "Chapter 029"
+   },
+   {
+    "id": 29,
+    "start": 34161.711021,
+    "end": 34541.792654000004,
+    "title": "Chapter 030"
+   },
+   {
+    "id": 30,
+    "start": 34541.792654000004,
+    "end": 36229.95591900001,
+    "title": "Chapter 031"
+   },
+   {
+    "id": 31,
+    "start": 36229.95591900001,
+    "end": 38494.928980000004,
+    "title": "Chapter 032"
+   },
+   {
+    "id": 32,
+    "start": 38494.928980000004,
+    "end": 38685.309388,
+    "title": "Chapter 033"
+   },
+   {
+    "id": 33,
+    "start": 38685.309388,
+    "end": 39125.342041,
+    "title": "Chapter 034"
+   },
+   {
+    "id": 34,
+    "start": 39125.342041,
+    "end": 40210.520817000004,
+    "title": "Chapter 035"
+   },
+   {
+    "id": 35,
+    "start": 40210.520817000004,
+    "end": 40900.623674,
+    "title": "Chapter 036"
+   },
+   {
+    "id": 36,
+    "start": 40900.623674,
+    "end": 41538.168164,
+    "title": "Chapter 037"
+   },
+   {
+    "id": 37,
+    "start": 41538.168164,
+    "end": 42927.751837,
+    "title": "Chapter 038"
+   },
+   {
+    "id": 38,
+    "start": 42927.751837,
+    "end": 43982.602449000005,
+    "title": "Chapter 039"
+   },
+   {
+    "id": 39,
+    "start": 43982.602449000005,
+    "end": 44912.013061000005,
+    "title": "Chapter 040"
+   },
+   {
+    "id": 40,
+    "start": 44912.013061000005,
+    "end": 46456.58122400001,
+    "title": "Chapter 041"
+   },
+   {
+    "id": 41,
+    "start": 46456.58122400001,
+    "end": 47898.88000000001,
+    "title": "Chapter 042"
+   },
+   {
+    "id": 42,
+    "start": 47898.88000000001,
+    "end": 49896.045714000014,
+    "title": "Chapter 043"
+   },
+   {
+    "id": 43,
+    "start": 49896.045714000014,
+    "end": 50648.581224000016,
+    "title": "Chapter 044"
+   },
+   {
+    "id": 44,
+    "start": 50648.581224000016,
+    "end": 52005.01551000002,
+    "title": "Chapter 045"
+   },
+   {
+    "id": 45,
+    "start": 52005.01551000002,
+    "end": 52777.56081600002,
+    "title": "Chapter 046"
+   },
+   {
+    "id": 46,
+    "start": 52777.56081600002,
+    "end": 54335.63428500002,
+    "title": "Chapter 047"
+   },
+   {
+    "id": 47,
+    "start": 54335.63428500002,
+    "end": 56066.24653000002,
+    "title": "Chapter 048"
+   },
+   {
+    "id": 48,
+    "start": 56066.24653000002,
+    "end": 57513.48244800002,
+    "title": "Chapter 049"
+   },
+   {
+    "id": 49,
+    "start": 57513.48244800002,
+    "end": 58568.75101900002,
+    "title": "Chapter 050"
+   },
+   {
+    "id": 50,
+    "start": 58568.75101900002,
+    "end": 59817.221223000015,
+    "title": "Chapter 051"
+   },
+   {
+    "id": 51,
+    "start": 59817.221223000015,
+    "end": 61465.33877400002,
+    "title": "Chapter 052"
+   },
+   {
+    "id": 52,
+    "start": 61465.33877400002,
+    "end": 61618.83428400002,
+    "title": "Chapter 053"
+   },
+   {
+    "id": 53,
+    "start": 61618.83428400002,
+    "end": 62346.23999800002,
+    "title": "Chapter 054"
+   },
+   {
+    "id": 54,
+    "start": 62346.23999800002,
+    "end": 62898.28571200002,
+    "title": "Chapter 055"
+   },
+   {
+    "id": 55,
+    "start": 62898.28571200002,
+    "end": 63724.04244700002,
+    "title": "Chapter 056"
+   },
+   {
+    "id": 56,
+    "start": 63724.04244700002,
+    "end": 65423.255508000024,
+    "title": "Chapter 057"
+   },
+   {
+    "id": 57,
+    "start": 65423.255508000024,
+    "end": 66118.53061000003,
+    "title": "Chapter 058"
+   },
+   {
+    "id": 58,
+    "start": 66118.53061000003,
+    "end": 67880.80326300004,
+    "title": "Chapter 059"
+   },
+   {
+    "id": 59,
+    "start": 67880.80326300004,
+    "end": 68572.91754900003,
+    "title": "Chapter 060"
+   },
+   {
+    "id": 60,
+    "start": 68572.91754900003,
+    "end": 68842.89305900004,
+    "title": "Chapter 061"
+   }
+  ],
+  "ebookFile": null
+ }
+}

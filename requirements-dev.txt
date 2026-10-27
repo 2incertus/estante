@@ -1,0 +1,6 @@
+pillow>=11
+pytest>=8
+jinja2
+requests
+psutil
+python-dotenv
