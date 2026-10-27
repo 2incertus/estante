@@ -1,0 +1,16 @@
+[Unit]
+Description=Estante conductor (rotation, Ouvido buttons, Now listening watch)
+After=network-online.target inkypi.service
+Wants=inkypi.service
+
+[Service]
+Type=simple
+User=root
+Environment=ESTANTE_CONFIG=/etc/estante/estante.json
+WorkingDirectory=/opt/estante
+ExecStart=/usr/bin/python3 /opt/estante/ctl/estante_ctl.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
