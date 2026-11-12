@@ -8,6 +8,9 @@ Type=simple
 User=root
 Environment=ESTANTE_CONFIG=/etc/estante/estante.json
 WorkingDirectory=/opt/estante
+# unbind the kernel console from the framebuffer so its messages never paint over the frame;
+# the leading - ignores a missing vtcon1
+ExecStartPre=-/bin/sh -c 'echo 0 > /sys/class/vtconsole/vtcon1/bind'
 ExecStart=/opt/estante/.venv/bin/python /opt/estante/ctl/estante_ctl.py
 Restart=always
 RestartSec=5

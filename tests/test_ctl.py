@@ -262,6 +262,7 @@ def test_unit_file():
         "Wants=network-online.target",
         "ExecStart=/opt/estante/.venv/bin/python /opt/estante/ctl/estante_ctl.py",
         "Environment=ESTANTE_CONFIG=/etc/estante/estante.json",
+        "ExecStartPre=-/bin/sh -c 'echo 0 > /sys/class/vtconsole/vtcon1/bind'",
         "Restart=always",
         "RestartSec=5",
         "WantedBy=multi-user.target",

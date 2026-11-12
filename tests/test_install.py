@@ -511,6 +511,8 @@ def test_unit_rewritten_to_the_checkout():
     assert "ExecStart=/home/admin/estante/.venv/bin/python /home/admin/estante/ctl/estante_ctl.py" in result.stdout
     assert "/opt/estante" not in result.stdout
     assert "Environment=ESTANTE_CONFIG=/etc/estante/estante.json" in result.stdout
+    # the console unbind survives the rewrite untouched
+    assert "ExecStartPre=-/bin/sh -c 'echo 0 > /sys/class/vtconsole/vtcon1/bind'" in result.stdout.splitlines()
 
 
 @pytest.mark.parametrize("path", ["/srv/a&b/estante", "/srv/a#b/estante", "/srv/a\\1/estante"])
