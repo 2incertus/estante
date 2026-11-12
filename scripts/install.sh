@@ -5,7 +5,8 @@
 #   sudo scripts/install.sh [--abs-url URL] [--rotate 180|0]
 #
 # and type the Audiobookshelf token at the prompt (or give it as ESTANTE_ABS_TOKEN through
-# sudo --preserve-env=ESTANTE_ABS_TOKEN, or as --abs-token-file PATH). The token is never
+# sudo --preserve-env=ESTANTE_ABS_TOKEN, or as --abs-token-file PATH). A rerun keeps the
+# token the config already holds; a new token is checked with GET /api/me before it is written. The token is never
 # taken from the command line on a real run: sudo logs the command line to the journal,
 # ps shows it for the whole run and the shell keeps it in its history.
 #
@@ -36,6 +37,7 @@ ABS_URL=""
 ABS_TOKEN=""
 ABS_TOKEN_FLAG=""
 ABS_TOKEN_FILE=""
+TOKEN_SOURCE=""
 ROTATE=""
 LIBRARY_ID=""
 CMDLINE_FILE="/boot/firmware/cmdline.txt"
@@ -49,9 +51,11 @@ usage: sudo scripts/install.sh [--abs-url URL] [--rotate 180|0] [--library-id ID
                                [--abs-token-file PATH] [--cmdline-file PATH] [--dry-run]
 
 The Audiobookshelf API token, written to $CONFIG_FILE (mode 600) and never echoed,
-comes from the first of:
+comes from the first of the sources below. A new token is checked with one
+GET /api/me before it is written; a rejected one stops the installer.
   --abs-token-file PATH  a file holding the token (keep it mode 600)
   ESTANTE_ABS_TOKEN      the environment; through sudo: sudo --preserve-env=ESTANTE_ABS_TOKEN ...
+  the existing config    on a rerun, the token $CONFIG_FILE already holds (kept as is)
   a prompt               when stdin is a terminal
   --abs-token TOKEN      only with --dry-run (sudo would log it, ps would show it)
 
@@ -99,13 +103,48 @@ pillow_ok() {
         'import sys, PIL; sys.exit(0 if int(PIL.__version__.split(".")[0]) >= 11 else 1)' 2> /dev/null
 }
 
-# GET /api/libraries. The token goes to curl on stdin as a config line, so it never
-# shows in the process list.
-abs_libraries() {
+# The curl config line carrying $ABS_TOKEN. It goes to curl on stdin (printf is a shell
+# builtin), so the token never shows in the process list.
+abs_auth_config() {
     local token="${ABS_TOKEN//\\/\\\\}"
     token="${token//\"/\\\"}"
-    printf 'header = "Authorization: Bearer %s"\n' "$token" \
-        | curl -sf --max-time 15 -K - "$ABS_URL/api/libraries"
+    printf 'header = "Authorization: Bearer %s"\n' "$token"
+}
+
+# GET /api/libraries with $ABS_TOKEN.
+abs_libraries() {
+    abs_auth_config | curl -sf --max-time 15 -K - "$ABS_URL/api/libraries"
+}
+
+# One GET /api/me with $ABS_TOKEN; dies with the reason unless Audiobookshelf answers 200.
+verify_token() {
+    local code
+    code="$(abs_auth_config | curl -s -o /dev/null -w '%{http_code}' --max-time 15 -K - "$ABS_URL/api/me" || true)"
+    case "$code" in
+        200)
+            echo "token accepted by $ABS_URL (GET /api/me)"
+            ;;
+        401|403)
+            die "Audiobookshelf at $ABS_URL rejected the token (HTTP $code on GET /api/me); \
+$CONFIG_FILE was not changed. Copy the API token again from Audiobookshelf and run the installer again."
+            ;;
+        *)
+            die "could not verify the token at $ABS_URL/api/me (HTTP ${code:-none}): is Audiobookshelf \
+up and the address right (--abs-url)? $CONFIG_FILE was not changed."
+            ;;
+    esac
+}
+
+# The token is checked before anything is written: a token kept from the existing config
+# is trusted, the --abs-token of a dry run is only announced, any other is verified.
+check_token() {
+    if [ "$TOKEN_SOURCE" = "kept" ]; then
+        echo "token kept from the existing config, not checked again"
+    elif [ -n "$DRY_RUN" ] && [ "$TOKEN_SOURCE" = "flag" ]; then
+        echo "would verify the token: GET $ABS_URL/api/me"
+    else
+        verify_token
+    fi
 }
 
 # stdin: the /api/libraries JSON. Prints the id of the library named $1 (case and
@@ -313,6 +352,47 @@ with open(sys.argv[1], encoding="utf-8") as f:
 ' "$REPO/ctl/estante-ctl.service" "$1"
 }
 
+# Step 3: check the token, settle the Audiobooks library id, then write $CONFIG_FILE (on a
+# dry run, print it). Reads ABS_URL, ABS_TOKEN, TOKEN_SOURCE, LIBRARY_ID, EXISTING_LIBRARY_ID,
+# ROTATE and DRY_RUN. A rejected token stops here, before anything is written.
+configure() {
+    local libraries
+    check_token
+    if [ -n "$LIBRARY_ID" ]; then
+        echo "library id $LIBRARY_ID (from --library-id)"
+    elif [ -n "$EXISTING_LIBRARY_ID" ]; then
+        LIBRARY_ID="$EXISTING_LIBRARY_ID"
+        echo "library id $LIBRARY_ID (from the existing config; --library-id to change it)"
+    else
+        libraries="$(abs_libraries)" \
+            || die "could not list the libraries at $ABS_URL/api/libraries (wrong address or token?)"
+        LIBRARY_ID="$(printf '%s' "$libraries" | find_library_id "$LIBRARY_NAME" "$ABS_URL")" || exit 1
+        echo "library \"$LIBRARY_NAME\" is $LIBRARY_ID"
+    fi
+    if [ -n "$DRY_RUN" ]; then
+        echo "would write $CONFIG_FILE (mode 600, token hidden here):"
+        echo "BEGIN estante.json"
+        ESTANTE_ABS_TOKEN="(hidden)" render_config \
+            "$REPO/ctl/estante.example.json" "$CONFIG_FILE" "$ABS_URL" "$LIBRARY_ID" "$ROTATE"
+        echo "END estante.json"
+    else
+        ESTANTE_ABS_TOKEN="$ABS_TOKEN" write_config "$ABS_URL" "$LIBRARY_ID" "$ROTATE"
+    fi
+}
+
+# estante-ctl did not come up: die with the journal hint and, while the running kernel
+# lacks the forced HDMI mode (so /dev/fb0 may be missing without a screen), the reboot line.
+service_failed() {
+    local message
+    message="estante-ctl did not answer at $CTL_URL/state within ${WAIT_SECONDS}s (journalctl -u estante-ctl)"
+    if reboot_needed "$PROC_CMDLINE"; then
+        message="$message
+$(reboot_line)
+(until that reboot the framebuffer may not exist, so estante-ctl cannot start)"
+    fi
+    die "$message"
+}
+
 wait_for_state() {
     local deadline=$((SECONDS + WAIT_SECONDS))
     while [ "$SECONDS" -lt "$deadline" ]; do
@@ -368,9 +448,17 @@ if [ -z "$DRY_RUN" ] && [ "$(id -u)" -ne 0 ]; then
     die "run as root: sudo scripts/install.sh ..."
 fi
 
-# ---- the token: --abs-token (dry run only), --abs-token-file, ESTANTE_ABS_TOKEN, a prompt
+# ---- what an earlier install left in the config; flags override it
+EXISTING_URL="$(config_get "$CONFIG_FILE" abs_url)"
+EXISTING_ROTATE="$(config_get "$CONFIG_FILE" rotate)"
+EXISTING_LIBRARY_ID="$(config_get "$CONFIG_FILE" audiobooks_id)"
+EXISTING_TOKEN="$(config_get "$CONFIG_FILE" abs_token)"
+
+# ---- the token: --abs-token (dry run only), --abs-token-file, ESTANTE_ABS_TOKEN, the
+# existing config's, a prompt
 if [ -n "$ABS_TOKEN_FLAG" ]; then
     ABS_TOKEN="$ABS_TOKEN_FLAG"
+    TOKEN_SOURCE="flag"
 elif [ -n "$ABS_TOKEN_FILE" ]; then
     [ -f "$ABS_TOKEN_FILE" ] && [ -r "$ABS_TOKEN_FILE" ] \
         || usage_error "cannot read --abs-token-file $ABS_TOKEN_FILE"
@@ -381,27 +469,31 @@ elif [ -n "$ABS_TOKEN_FILE" ]; then
     if [ -n "$mode" ] && [ "${mode: -2}" != "00" ]; then
         echo "install: warning: $ABS_TOKEN_FILE is mode $mode; chmod 600 it" >&2
     fi
+    TOKEN_SOURCE="file"
 elif [ -n "${ESTANTE_ABS_TOKEN:-}" ]; then
     ABS_TOKEN="$ESTANTE_ABS_TOKEN"
+    TOKEN_SOURCE="env"
+elif [ -n "$EXISTING_TOKEN" ]; then
+    ABS_TOKEN="$EXISTING_TOKEN"
+    TOKEN_SOURCE="kept"
 elif [ -t 0 ]; then
     read -rs -p "Audiobookshelf API token: " ABS_TOKEN
     echo >&2
     [ -n "$ABS_TOKEN" ] || usage_error "no token typed"
+    TOKEN_SOURCE="prompt"
 else
     usage_error "no Audiobookshelf token: set ESTANTE_ABS_TOKEN (through sudo: \
 sudo --preserve-env=ESTANTE_ABS_TOKEN), pass --abs-token-file PATH, or run from a terminal \
 to be prompted"
 fi
 
-# ---- what an earlier install left in the config; flags override it
-EXISTING_URL="$(config_get "$CONFIG_FILE" abs_url)"
-EXISTING_ROTATE="$(config_get "$CONFIG_FILE" rotate)"
-EXISTING_LIBRARY_ID="$(config_get "$CONFIG_FILE" audiobooks_id)"
-
 if [ -n "$DRY_RUN" ]; then
     echo "dry run: nothing will be changed"
 fi
 echo "checkout: $REPO"
+if [ "$TOKEN_SOURCE" = "kept" ]; then
+    echo "keeping the token from the existing config (a new one: ESTANTE_ABS_TOKEN or --abs-token-file)"
+fi
 if [ -n "$ABS_URL" ]; then
     echo "Audiobookshelf: $ABS_URL (from --abs-url)"
 elif [ -n "$EXISTING_URL" ]; then
@@ -450,26 +542,7 @@ fi
 
 # ---- 3. the config, with the Audiobooks library id
 step "3. $CONFIG_FILE"
-if [ -n "$LIBRARY_ID" ]; then
-    echo "library id $LIBRARY_ID (from --library-id)"
-elif [ -n "$EXISTING_LIBRARY_ID" ]; then
-    LIBRARY_ID="$EXISTING_LIBRARY_ID"
-    echo "library id $LIBRARY_ID (from the existing config; --library-id to change it)"
-else
-    libraries="$(abs_libraries)" \
-        || die "could not list the libraries at $ABS_URL/api/libraries (wrong address or token?)"
-    LIBRARY_ID="$(printf '%s' "$libraries" | find_library_id "$LIBRARY_NAME" "$ABS_URL")" || exit 1
-    echo "library \"$LIBRARY_NAME\" is $LIBRARY_ID"
-fi
-if [ -n "$DRY_RUN" ]; then
-    echo "would write $CONFIG_FILE (mode 600, token hidden here):"
-    echo "BEGIN estante.json"
-    ESTANTE_ABS_TOKEN="(hidden)" render_config \
-        "$REPO/ctl/estante.example.json" "$CONFIG_FILE" "$ABS_URL" "$LIBRARY_ID" "$ROTATE"
-    echo "END estante.json"
-else
-    ESTANTE_ABS_TOKEN="$ABS_TOKEN" write_config "$ABS_URL" "$LIBRARY_ID" "$ROTATE"
-fi
+configure
 
 # ---- 4. state dir and cover cache
 step "4. $STATE_DIR/covers"
@@ -527,14 +600,13 @@ else
         run systemctl enable "$SERVICE"
     fi
     if [ "$UNIT_CHANGED" = "yes" ] || [ "$CONFIG_CHANGED" = "yes" ]; then
-        run systemctl restart "$SERVICE"
+        run systemctl restart "$SERVICE" || service_failed
     elif ! systemctl is-active --quiet "$SERVICE"; then
-        run systemctl start "$SERVICE"
+        run systemctl start "$SERVICE" || service_failed
     else
         echo "$SERVICE unchanged, not restarted (after a code update: sudo systemctl restart estante-ctl)"
     fi
-    wait_for_state \
-        || die "estante-ctl did not answer at $CTL_URL/state within ${WAIT_SECONDS}s (journalctl -u estante-ctl)"
+    wait_for_state || service_failed
     echo "estante-ctl answers at $CTL_URL/state"
 fi
 

@@ -521,3 +521,103 @@ def test_unit_for_a_path_with_sed_metacharacters(path):
     assert result.returncode == 0, result.stderr
     assert f"ExecStart={path}/.venv/bin/python {path}/ctl/estante_ctl.py" in result.stdout.splitlines()
     assert f"WorkingDirectory={path}" in result.stdout.splitlines()
+
+
+# ---- the token: kept on a rerun, verified before it is written
+
+
+def _configure(config_dir, abs_url, token, source, library_id="LIB"):
+    """Run the installer's step 3 (configure) for real into `config_dir`, no root needed."""
+    return _source(
+        'CONFIG_DIR="$1"; CONFIG_FILE="$1/estante.json"; ABS_URL="$2"; ABS_TOKEN="$3"; '
+        'TOKEN_SOURCE="$4"; LIBRARY_ID="$5"; ROTATE=180; DRY_RUN=""; configure',
+        str(config_dir), abs_url, token, source, library_id,
+    )
+
+
+def test_rerun_keeps_the_existing_token(config_dir, tmp_path):
+    # no --abs-token, no file, no ESTANTE_ABS_TOKEN and no terminal: the existing token stays
+    _existing(config_dir, abs_token="KEPTTOKEN")
+    result = _run("--dry-run", "--cmdline-file", str(tmp_path / "none"), config_dir=config_dir)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "keeping the token from the existing config" in result.stdout
+    # a kept token is not checked again, so no GET goes to the kept (unreachable) address
+    assert "would verify" not in result.stdout
+    assert "KEPTTOKEN" not in result.stdout + result.stderr
+
+
+def test_a_kept_token_is_written_back_unchecked(config_dir):
+    _existing(config_dir, abs_url=DEAD_URL)
+    result = _configure(config_dir, DEAD_URL, "old", "kept")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads((config_dir / "estante.json").read_text())["abs_token"] == "old"
+
+
+def test_a_rejected_token_dies_before_writing(fake_abs, config_dir):
+    existing = _existing(config_dir, abs_url=fake_abs.base_url)
+    before = (config_dir / "estante.json").read_bytes()
+    result = _configure(config_dir, fake_abs.base_url, "WRONG", "env")
+    assert result.returncode == 1
+    assert "rejected the token" in result.stderr and "401" in result.stderr
+    assert "WRONG" not in result.stdout + result.stderr
+    assert "/api/me" in fake_abs.calls
+    assert (config_dir / "estante.json").read_bytes() == before
+    assert sorted(p.name for p in config_dir.iterdir()) == ["estante.json"]
+    assert existing["abs_token"] == "old"
+
+
+def test_a_forbidden_token_dies_too(fake_abs, config_dir):
+    fake_abs.fail_with = 403
+    result = _configure(config_dir, fake_abs.base_url, "TESTTOKEN", "file")
+    assert result.returncode == 1 and "rejected the token" in result.stderr and "403" in result.stderr
+    assert list(config_dir.iterdir()) == []
+
+
+def test_an_unreachable_server_writes_nothing(config_dir):
+    result = _configure(config_dir, DEAD_URL, "TESTTOKEN", "prompt")
+    assert result.returncode == 1 and "could not verify the token" in result.stderr
+    assert list(config_dir.iterdir()) == []
+
+
+def test_a_good_token_proceeds(fake_abs, config_dir):
+    _existing(config_dir, abs_url=fake_abs.base_url)
+    result = _configure(config_dir, fake_abs.base_url, "TESTTOKEN", "env")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "token accepted" in result.stdout
+    assert fake_abs.calls[0] == "/api/me"
+    assert json.loads((config_dir / "estante.json").read_text())["abs_token"] == "TESTTOKEN"
+    assert "TESTTOKEN" not in result.stdout + result.stderr
+
+
+def test_dry_run_with_the_token_flag_only_says_it_would_verify(tmp_path, config_dir):
+    result = _run(
+        "--dry-run", "--abs-url", DEAD_URL, "--abs-token", "x", "--library-id", "L",
+        "--cmdline-file", str(tmp_path / "none"), config_dir=config_dir,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"would verify the token: GET {DEAD_URL}/api/me" in result.stdout
+
+
+def test_dry_run_with_a_rejected_environment_token_stops(fake_abs, config_dir):
+    result = _run(
+        "--dry-run", "--abs-url", fake_abs.base_url, "--library-id", "L",
+        env={"ESTANTE_ABS_TOKEN": "WRONG"}, config_dir=config_dir,
+    )
+    assert result.returncode == 1 and "rejected the token" in result.stderr
+    assert "BEGIN estante.json" not in result.stdout
+
+
+# ---- a service that does not come up
+
+
+def test_service_failure_names_the_reboot_while_one_is_needed(tmp_path):
+    proc = tmp_path / "proc-cmdline"
+    proc.write_text(PI_CMDLINE + "\n")
+    result = _source('PROC_CMDLINE="$1"; WAIT_SECONDS=1; service_failed', str(proc))
+    assert result.returncode == 1
+    assert "did not answer" in result.stderr and "journalctl -u estante-ctl" in result.stderr
+    assert "REBOOT NEEDED" in result.stderr and "video=HDMI-A-1:1920x1080@60D" in result.stderr
+    proc.write_text(PI_CMDLINE + " " + WANTED + "\n")
+    result = _source('PROC_CMDLINE="$1"; WAIT_SECONDS=1; service_failed', str(proc))
+    assert result.returncode == 1 and "did not answer" in result.stderr
+    assert "REBOOT NEEDED" not in result.stderr
