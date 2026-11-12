@@ -20,10 +20,15 @@ from estante_lib.model import (
     surname,
 )
 from estante_lib.render_spines import (
+    AUTHOR_MIN_W,
     BOARD_COLOUR,
+    BOARD_H,
     BOARD_Y,
     LABEL_COLOUR,
+    LINE_W,
     PLINTH,
+    TITLE_PAD,
+    TITLE_ROOM,
     USABLE_H,
     ColourCache,
     Piece,
@@ -35,9 +40,10 @@ from estante_lib.render_spines import (
     render_section,
     section_of,
     spine_colour,
+    spine_layout,
     spine_title,
 )
-from estante_lib.text import ELLIPSIS
+from estante_lib.text import ELLIPSIS, SERIF, font, text_width
 from estante_lib.theme import DARK, PAPER
 
 W = 1230
@@ -179,17 +185,33 @@ def test_pieces_spines_for_unread_faces_for_read_and_listening():
     assert piece_for(_book("u"), hours).kind == "spine"
     assert piece_for(_book("r", status=STATUS_READ), hours).kind == "face"
     face = piece_for(_book("l", status=STATUS_LISTENING), hours)
-    assert (face.kind, face.width, face.height) == ("face", 150, USABLE_H)
-    # 18 + hours * 0.9, clamped to 22..52
-    assert piece_for(_book("u"), hours).width == 27
-    assert piece_for(_book("long"), hours).width == 52
-    assert piece_for(_book("short"), hours).width == 22
-    assert piece_for(_book("missing"), {}).width == 22
+    assert (face.kind, face.width, face.height) == ("face", 200, USABLE_H)
+    # 28 + hours * 1.2, clamped to 34..70 (a one-word title never widens its spine)
+    assert piece_for(_book("u"), hours).width == 40
+    assert piece_for(_book("long"), hours).width == 70
+    assert piece_for(_book("short"), hours).width == 34
+    assert piece_for(_book("missing"), {}).width == 34
+
+
+def test_three_boards_end_where_the_four_did():
+    assert BOARD_Y == (110, 420, 730) and render_spines.BOARDS == 3 and USABLE_H == 286
+    assert BOARD_Y[-1] + USABLE_H + BOARD_H == 1030
+    # the tallest spine and a face-out stand under the next board
+    for top, nxt in zip(BOARD_Y, BOARD_Y[1:]):
+        assert top + USABLE_H + BOARD_H <= nxt
+
+
+def test_plan_sections_reads_the_board_count_when_called(library, monkeypatch):
+    _, runs, hours, _ = library
+    monkeypatch.setattr(render_spines, "BOARDS", 2)
+    sections = plan_sections(runs, hours)
+    assert all(len(section) <= 2 for section in sections)
+    assert any(len(section) == 2 for section in sections)
 
 
 def test_spine_heights_are_deterministic_and_vary():
     heights = [piece_for(_book(f"id-{i}"), {}).height for i in range(200)]
-    assert all(178 <= h <= 206 for h in heights)
+    assert all(248 <= h <= 284 for h in heights)
     assert len(set(heights)) > 15
     again = [piece_for(_book(f"id-{i}"), {}).height for i in range(200)]
     assert heights == again
@@ -211,11 +233,11 @@ def _board_width(board, gap=2, run_gap=14):
     return x
 
 
-def test_fixture_packs_into_three_to_six_sections_without_overflow(library):
+def test_fixture_packs_into_seven_to_ten_sections_without_overflow(library):
     books, runs, hours, _ = library
     sections = plan_sections(runs, hours)
-    assert 3 <= len(sections) <= 6
-    assert all(1 <= len(section) <= 4 for section in sections)
+    assert 7 <= len(sections) <= 10
+    assert all(1 <= len(section) <= 3 for section in sections)
     for section in sections:
         for board in section:
             assert board and _board_width(board) <= W
@@ -226,8 +248,18 @@ def test_fixture_packs_into_three_to_six_sections_without_overflow(library):
     for placed_at, key in enumerate(run_order):
         planned_at = [r.key for r in runs].index(key)
         assert planned_at - placed_at <= render_spines.LOOKAHEAD
-    assert run_order[:2] == ["author:park saenal", "author:kim chi-woo"]
+    # with three boards of 200 px face-outs the first runs fit in their planned order
+    assert run_order[:6] == [r.key for r in runs[:6]]
     assert plan_sections(runs, hours) == sections
+
+
+def test_a_run_that_moves_on_leaves_its_hole_to_a_later_run():
+    faces = [_book(f"a{i}", status=STATUS_READ) for i in range(5)]
+    first = Run("author:a", "A", "author", faces)  # 5 * 202 - 2 = 1008 px
+    pair = Run("author:b", "B", "author", [_book(f"b{i}", status=STATUS_READ) for i in range(2)])
+    small = Run("author:c", "C", "author", [_book("c1")])  # one 34 px spine, a 40 px slot
+    boards = plan_sections([first, pair, small], {})[0]
+    assert [[run.key for run, _ in board] for board in boards] == [["author:a", "author:c"], ["author:b"]]
 
 
 def test_runs_that_fit_a_board_are_never_split(library):
@@ -247,9 +279,10 @@ def test_a_run_wider_than_a_board_wraps_onto_the_next():
     small = Run("author:s", "S", "author", [_book("s1")])
     sections = plan_sections([small, wide], {})
     boards = [board for section in sections for board in section]
-    # 30 face-outs at 150 px with 2 px gaps: 8 per board after the first (8 * 152 - 2 = 1214)
+    # 30 face-outs at 200 px with 2 px gaps: 5 beside the small run (54 + 5 * 202 - 2 = 1062),
+    # then 6 per board (6 * 202 - 2 = 1210)
     frags = [len(pieces) for board in boards for run, pieces in board if run.key == "series:wide"]
-    assert sum(frags) == 30 and len(frags) == 4
+    assert frags == [5, 6, 6, 6, 6, 1]
     assert all(_board_width(board) <= W for board in boards)
 
 
@@ -313,44 +346,140 @@ def _count(img, colour, tol=10):
 
 
 def test_spine_carries_its_title_and_author():
-    # Garamond 22 "Dune Messiah" is about 115 px, inside the 200 - 60 px the title may take
-    piece = Piece(_book("s", "Dune Messiah", "Frank Herbert"), "spine", 40, 200)
+    # Garamond 30 "Dune Messiah" is about 169 px, inside the 270 - 70 px the title may take
+    piece = Piece(_book("s", "Dune Messiah", "Frank Herbert"), "spine", 50, 270)
     img = draw_spine(piece, (40, 60, 120), DARK)
-    assert img.size == (40, 200)
+    assert img.size == (50, 270)
     assert _count(img, (245, 242, 232), tol=40) > 80  # off-white type on a dark spine
     assert spine_title(piece) == "Dune Messiah"
     light = draw_spine(piece, (230, 210, 160), DARK)
     assert _count(light, (28, 26, 24), tol=40) > 80
 
 
-def test_long_title_is_ellipsized_inside_the_spine():
+def _ink_box(img):
+    return img.convert("L").point(lambda v: 255 if v > 180 else 0).getbbox()
+
+
+def _two_line_width():
+    return 2 * LINE_W + 2 * TITLE_PAD
+
+
+def test_line_pitch_comes_from_the_font():
+    top, bottom = font(SERIF, 26, 500).getbbox("Hgy", anchor="ls")[1::2]
+    assert bottom - top < LINE_W <= bottom - top + 8
+    assert 28 <= LINE_W <= 32
+    assert 64 <= _two_line_width() <= 80
+
+
+def test_a_short_title_is_one_line_at_30():
+    layout = spine_layout("Dune Messiah", 50, 270)
+    assert (layout.size, layout.lines, layout.width) == (30, ("Dune Messiah",), 50)
+
+
+def test_a_medium_title_drops_to_26():
+    # Garamond 30 "Children of Time" is about 209 px, over the 200 px room; at 26 about 181
+    layout = spine_layout("Children of Time", 50, 270)
+    assert (layout.size, layout.lines, layout.width) == (26, ("Children of Time",), 50)
+
+
+def test_a_narrow_spine_starts_at_26():
+    layout = spine_layout("Dune", 40, 270)
+    assert (layout.size, layout.lines, layout.width) == (26, ("Dune",), 40)
+
+
+def test_a_long_title_wraps_to_two_lines_and_widens_the_spine():
+    # about 269 px at 26: two lines, each inside the 200 px room, cut between words
+    layout = spine_layout("The Lies of Locke Lamora", 40, 270)
+    assert layout.size == 26 and len(layout.lines) == 2
+    assert " ".join(layout.lines) == "The Lies of Locke Lamora"
+    assert all(text_width(font(SERIF, 26, 500), line) <= 270 - TITLE_ROOM for line in layout.lines)
+    assert layout.width == _two_line_width()
+    # a long book already wider than two lines keeps its width
+    assert spine_layout("The Lies of Locke Lamora", 90, 270).width == 90
+
+
+def test_a_very_long_title_ends_with_the_ellipsis_on_line_two():
+    title = "The Hitchhiker's Guide to the Galaxy and Everything After It, the Complete Edition"
+    layout = spine_layout(title, 40, 270)
+    assert layout.size == 26 and len(layout.lines) == 2
+    first, second = layout.lines
+    assert not first.endswith(ELLIPSIS) and title.startswith(first + " ")
+    assert second.endswith(ELLIPSIS)
+    assert all(text_width(font(SERIF, 26, 500), line) <= 200 for line in layout.lines)
+
+
+def test_a_word_longer_than_the_room_is_cut():
+    layout = spine_layout("Supercalifragilisticexpialidocious Antidisestablishmentarianism", 40, 270)
+    assert len(layout.lines) == 2 and layout.lines[0].endswith(ELLIPSIS)
+    assert layout.lines[1].endswith(ELLIPSIS)
+    alone = spine_layout("Supercalifragilisticexpialidocious", 40, 270)
+    # one word is one line, cut: there is nothing to put on a second line
+    assert len(alone.lines) == 1 and alone.lines[0].endswith(ELLIPSIS) and alone.width == 40
+
+
+def test_piece_for_widens_a_long_titled_short_book():
+    book = _book("x", "The Hitchhiker's Guide to the Galaxy", "Douglas Adams")
+    piece = piece_for(book, {"x": 2.0})
+    assert piece.width == _two_line_width()
+    assert spine_layout(book.title, piece.width, piece.height).width == piece.width
+    assert piece_for(_book("y", "Dune", "Frank Herbert"), {"y": 2.0}).width == 34
+
+
+def test_two_line_spine_draws_both_lines_inside_and_no_author():
+    book = _book("s", "The Lies of Locke Lamora", "Scott Lynch")
+    w = _two_line_width()
+    piece = Piece(book, "spine", w, 270)
+    img = draw_spine(piece, (40, 60, 120), DARK)
+    assert img.size == (w, 270)
+    x0, y0, x1, y1 = _ink_box(img)
+    # nothing touches the long edges or the spine's ends
+    assert x0 >= 2 and x1 <= w - 4
+    assert y0 >= TITLE_ROOM - 10 and y1 <= 270 - 4
+    # two lines: ink in both halves of the width
+    left = _ink_box(img.crop((0, 0, w // 2, 270)))
+    right = _ink_box(img.crop((w // 2, 0, w, 270)))
+    assert left is not None and right is not None
+    # no author at the top: the top 50 px carry no type
+    assert _ink_box(img.crop((0, 5, w, 50))) is None
+
+
+def test_long_title_is_wrapped_and_ellipsized_inside_the_spine():
     title = ("A very long title that keeps going " * 4)[:120]
-    piece = Piece(_book("s", title, ""), "spine", 22, 180)
+    piece = piece_for(_book("s", title, ""), {})
     assert spine_title(piece).endswith(ELLIPSIS)
     img = draw_spine(piece, (40, 60, 120), DARK)
-    ink = img.convert("L").point(lambda v: 255 if v > 180 else 0)
-    box = ink.getbbox()
-    assert box is not None
-    x0, y0, x1, y1 = box
-    # the type stays clear of the long edges and of the top 50 px; nothing is cut at the spine's ends
-    assert x0 >= 1 and x1 <= 21
-    assert y0 >= 50 and y1 <= 180 - 4
+    x0, y0, x1, y1 = _ink_box(img)
+    w, h = piece.width, piece.height
+    assert x0 >= 2 and x1 <= w - 4
+    assert y0 >= 50 and y1 <= h - 4
+
+
+@pytest.mark.parametrize("title", ["Dune", "Children of Time", "The Lies of Locke Lamora", "Wwwwwwwwwwwwwwwwwwwww"])
+@pytest.mark.parametrize("hours", [0, 8, 40])
+def test_type_never_leaves_the_spine(title, hours):
+    piece = piece_for(_book(f"{title}-{hours}", title, "Ursula K. Le Guin"), {f"{title}-{hours}": hours})
+    img = draw_spine(piece, (40, 60, 120), DARK)
+    x0, y0, x1, y1 = _ink_box(img)
+    assert x0 >= 1 and x1 <= piece.width - 3
+    assert y0 >= 4 and y1 <= piece.height - 4
 
 
 def test_face_out_listening_has_ribbon_and_progress_read_has_neither():
     cover = Image.new("RGB", (120, 120), (90, 140, 90))
-    listening = Piece(_book("l", status=STATUS_LISTENING), "face", 150, USABLE_H)
+    listening = Piece(_book("l", status=STATUS_LISTENING), "face", 200, USABLE_H)
     img = draw_face(listening, cover, 0.5, DARK)
-    assert img.size == (150, USABLE_H)
-    assert _count(img, DARK.accent, tol=4) > 12 * 50
-    base = img.crop((6, USABLE_H - 6, 144, USABLE_H - 2))
-    assert _count(base, DARK.accent, tol=4) >= 60 * 3
-    read = draw_face(Piece(_book("r", status=STATUS_READ), "face", 150, USABLE_H), cover, None, DARK)
+    assert img.size == (200, USABLE_H)
+    # the 14 x 72 ribbon, less its 9 px notch
+    assert 14 * 60 < _count(img, DARK.accent, tol=4) < 14 * 72 + 186 * 4
+    # the progress line runs under the 186 px cover: half of it at 0.5
+    base = img.crop((0, USABLE_H - 6, 200, USABLE_H - 2))
+    assert _count(base, DARK.accent, tol=4) == 93 * 4
+    read = draw_face(Piece(_book("r", status=STATUS_READ), "face", 200, USABLE_H), cover, None, DARK)
     assert _count(read, DARK.accent, tol=4) == 0
     assert _count(read, PLINTH, tol=2) > 0
-    assert _count(read, (90, 140, 90), tol=8) > 130 * 130
-    missing = draw_face(Piece(_book("m", "Dune", status=STATUS_READ), "face", 150, USABLE_H), None, None, PAPER)
-    assert _count(missing, spine_colour(None, "Dune"), tol=2) > 130 * 130
+    assert _count(read, (90, 140, 90), tol=8) == 186 * 186
+    missing = draw_face(Piece(_book("m", "Dune", status=STATUS_READ), "face", 200, USABLE_H), None, None, PAPER)
+    assert _count(missing, spine_colour(None, "Dune"), tol=2) > 180 * 180
 
 
 def _section_view(library, section=0, books=None, runs=None, colours=None, covers=None):
@@ -373,13 +502,13 @@ def test_render_section_size_header_and_footer(library):
         assert img.size == (W, 1080) and img.mode == "RGB"
         assert img.getpixel((W - 1, 1075)) == theme.bg
     n = info["sections"]
-    assert info["section"] == 0 and 3 <= n <= 6
+    assert info["section"] == 0 and 7 <= n <= 10
     assert info["subtitle"] == f"Audiobooks, by series and author  ·  shelf 1 of {n}"
     assert info["first_author"] == "Saenal"
     assert info["footer"] == (
         f"{info['count']} of 311 on this shelf  ·  Saenal to {info['last_author']}  ·  next shelf in 2 min"
     )
-    assert 20 <= info["count"] <= 200
+    assert 10 <= info["count"] <= 150
     # section numbers wrap
     _, info = render_section(_section_view(library, section=n + 1), DARK)
     assert info["section"] == 1 and info["subtitle"].endswith(f"shelf 2 of {n}")
@@ -412,8 +541,8 @@ def test_face_outs_on_the_first_board_show_covers(library):
     covers = {b.item_id: Image.new("RGB", (120, 120), (20, 200, 220)) for b in books if b.status != STATUS_UNREAD}
     img, _ = render_section(_section_view(library, covers=covers), DARK)
     first = img.crop((0, BOARD_Y[0], W, BOARD_Y[0] + USABLE_H))
-    assert _count(first, (20, 200, 220), tol=6) > 138 * 138 * 3
-    assert _count(first, DARK.accent, tol=4) > 12 * 50  # Overgeared's ribbon
+    assert _count(first, (20, 200, 220), tol=6) > 186 * 186 * 3
+    assert _count(first, DARK.accent, tol=4) > 14 * 60  # Overgeared's ribbon
 
 
 def test_empty_library_renders_shelf_1_of_1():
@@ -449,14 +578,15 @@ def test_heaviest_section_is_the_one_with_most_spines(library):
     ]
     index, count = render_spines.heaviest_section(runs, hours)
     assert count == max(spines) and spines[index] == count
-    assert index == len(plan) - 1  # the unread tail, all spines
+    # a section of the unread tail, all spines (wrapped titles widen some, so not always the last)
+    assert all(p.kind == "spine" for board in plan[index] for _, pieces in board for p in pieces)
     assert render_spines.heaviest_section([], {}) == (0, 0)
 
 
 def test_the_heaviest_section_renders_fast_with_cached_colours(library):
     _, runs, hours, _ = library
     index, count = render_spines.heaviest_section(runs, hours)
-    assert count >= 80
+    assert count >= 40
     view = _section_view(library, section=index)
     render_spines.clear_caches()
     start = time.perf_counter()
@@ -482,12 +612,39 @@ def _ink_rows(img):
 
 
 def test_author_surname_is_whole_or_absent():
-    short = Piece(_book("s", "Dune", "Frank Herbert"), "spine", 40, 200)
-    top = draw_spine(short, (40, 60, 120), DARK).crop((0, 5, 40, 60))
+    assert AUTHOR_MIN_W == 44
+    short = Piece(_book("s", "Dune", "Frank Herbert"), "spine", 50, 270)
+    top = draw_spine(short, (40, 60, 120), DARK).crop((0, 5, 50, 70))
     assert _ink_rows(top) is not None  # "Herbert" at the top
-    crowded = Piece(_book("c", "A title long enough to fill the room", "Frank Herbert"), "spine", 40, 200)
-    assert spine_title(crowded).endswith(ELLIPSIS)
-    top = draw_spine(crowded, (40, 60, 120), DARK).crop((0, 5, 40, 48))
-    assert _ink_rows(top) is None  # no clipped surname
-    narrow = Piece(_book("n", "Dune", "Frank Herbert"), "spine", 33, 200)
-    assert _ink_rows(draw_spine(narrow, (40, 60, 120), DARK).crop((0, 5, 33, 60))) is None
+    # one line at 26 that leaves no room for the whole surname: no clipped "Herb..."
+    crowded = Piece(_book("c", "Children of Time", "Adrian Tchaikovsky"), "spine", 50, 270)
+    assert spine_title(crowded) == "Children of Time"
+    top = draw_spine(crowded, (40, 60, 120), DARK).crop((0, 5, 50, 52))
+    assert _ink_rows(top) is None
+    narrow = Piece(_book("n", "Dune", "Frank Herbert"), "spine", 43, 270)
+    assert _ink_rows(draw_spine(narrow, (40, 60, 120), DARK).crop((0, 5, 43, 70))) is None
+
+
+def test_fast_ellipsize_matches_ellipsize_on_the_fixture_titles(library):
+    from estante_lib.render_spines import _fast_ellipsize
+    from estante_lib.text import ellipsize
+
+    books, _, _, _ = library
+    fnt = font(SERIF, 26, 500)
+    for book in books:
+        title = " ".join(book.title.split())
+        for room in (60, 178, 214):
+            assert _fast_ellipsize(title, fnt, room) == ellipsize(title, fnt, room), (title, room)
+
+
+def test_every_fixture_spine_line_fits_its_room(library):
+    books, _, hours, _ = library
+    fnts = {26: font(SERIF, 26, 500), 30: font(SERIF, 30, 500)}
+    for book in books:
+        if book.status != STATUS_UNREAD:
+            continue
+        piece = piece_for(book, hours)
+        layout = spine_layout(book.title, piece.width, piece.height)
+        assert layout.width == piece.width
+        for line in layout.lines:
+            assert text_width(fnts[layout.size], line) <= piece.height - TITLE_ROOM, (book.title, line)

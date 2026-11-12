@@ -1,5 +1,6 @@
 """scripts/selftest.py renders the fixture composition, times it and checks the framebuffer."""
 import importlib.util
+import re
 import subprocess
 import sys
 
@@ -41,8 +42,10 @@ def test_selftest_ok_without_a_framebuffer(tmp_path):
     assert any(line.startswith("render ") and line.rstrip().endswith(" s") for line in lines), lines
     assert any("no framebuffer" in line for line in lines)
     timed = [line for line in lines if line.startswith("shelf section ")]
-    # the heaviest section of the fixture shelf: the last of 5, all spines
-    assert len(timed) == 1 and timed[0].startswith("shelf section 5 of 5: ") and " spines, " in timed[0], lines
+    # the heaviest section of the fixture shelf, all spines (however many sections there are)
+    assert len(timed) == 1, lines
+    match = re.match(r"shelf section (\d+) of (\d+): \d+ spines, ", timed[0])
+    assert match and 1 <= int(match.group(1)) <= int(match.group(2)), lines
     assert not any("warning" in line for line in lines)
 
 

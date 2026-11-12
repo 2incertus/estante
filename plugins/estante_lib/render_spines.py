@@ -1,8 +1,8 @@
-"""The shelf of spines: one library as books on wooden boards, a section of four boards at a time.
+"""The shelf of spines: one library as books on wooden boards, a section of three boards at a time.
 
 Unread books stand as spines in their cover's dominant colour with the title reading bottom
-to top; finished and in-progress books face out with their covers, the one in progress with a
-red ribbon and a progress line. Books come in runs (a series, or one author's other books),
+to top, on two lines when it is long (the spine widens to hold them); finished and in-progress
+books face out with their covers, the one in progress with a red ribbon and a progress line. Books come in runs (a series, or one author's other books),
 each with a label on the board under it; a run that fits a board is never split.
 """
 import collections
@@ -24,10 +24,11 @@ BASE_W, BASE_H = 1230, 1080
 TITLE_Y, COUNTS_Y, SUBTITLE_Y, RULE_Y = 48, 36, 66, 86
 FOOTER_RULE_Y, FOOTER_TEXT_Y = 1044, 1064
 
-# boards: four per section at a 230 px pitch, books stand on the board's top edge
-BOARD_Y = (110, 340, 570, 800)
+# boards: three per section at a 310 px pitch, books stand on the board's top edge; the last
+# board's bottom edge is at 1030, above the footer rule
+BOARD_Y = (110, 420, 730)
 BOARDS = len(BOARD_Y)
-USABLE_H = 206
+USABLE_H = 286
 BOARD_H = 14
 BOARD_COLOUR = (58, 48, 40)
 BOARD_EDGE = (96, 80, 66)
@@ -44,21 +45,25 @@ WRAP_MIN = 200
 # how many of the following runs may fill the hole a run leaves when it moves to the next board
 LOOKAHEAD = 6
 
-SPINE_MIN_W, SPINE_MAX_W = 22, 52
-SPINE_MIN_H, SPINE_MAX_H = 178, 206
-TITLE_SIZE, TITLE_SIZE_NARROW, NARROW_W = 22, 18, 30
-AUTHOR_SIZE, AUTHOR_MIN_W = 11, 34
-TITLE_ROOM = 60
+SPINE_MIN_W, SPINE_MAX_W = 34, 70
+SPINE_MIN_H, SPINE_MAX_H = 248, 284
+# a title is one line at TITLE_SIZE (on spines NARROW_W or wider), else one line at
+# TITLE_SIZE_SMALL, else two lines at TITLE_SIZE_SMALL on a spine widened to hold them
+TITLE_SIZE, TITLE_SIZE_SMALL, NARROW_W = 30, 26, 42
+AUTHOR_SIZE, AUTHOR_MIN_W = 14, 44
+TITLE_ROOM = 70
 TITLE_PAD = 8
+# the space between the descender of the first line and the caps of the second
+LINE_GAP = 5
 AUTHOR_PAD = 6
 AUTHOR_GAP = 10
 INK_LIGHT = (245, 242, 232)
 INK_DARK = (28, 26, 24)
 
-FACE_W = 150
-COVER = 138
+FACE_W = 200
+COVER = 186
 PLINTH = (10, 10, 12)
-RIBBON_W, RIBBON_H, RIBBON_NOTCH = 12, 60, 8
+RIBBON_W, RIBBON_H, RIBBON_NOTCH = 14, 72, 9
 
 KIND_SPINE = "spine"
 KIND_FACE = "face"
@@ -99,18 +104,21 @@ class ShelfSectionView:
 
 
 def spine_height(item_id):
-    """178..206 from the item id, the same on every machine."""
+    """248..284 from the item id, the same on every machine."""
     digest = hashlib.sha1(item_id.encode("utf-8")).digest()
     return SPINE_MIN_H + int.from_bytes(digest[:4], "big") % (SPINE_MAX_H - SPINE_MIN_H + 1)
 
 
 def spine_width(hours):
-    return int(max(SPINE_MIN_W, min(SPINE_MAX_W, 18 + (hours or 0) * 0.9)))
+    """The spine's width from the book's length; a two-line title may widen it (spine_layout)."""
+    return int(max(SPINE_MIN_W, min(SPINE_MAX_W, 28 + (hours or 0) * 1.2)))
 
 
 def piece_for(book, hours):
     if book.status == STATUS_UNREAD:
-        return Piece(book, KIND_SPINE, spine_width(hours.get(book.item_id)), spine_height(book.item_id))
+        height = spine_height(book.item_id)
+        layout = spine_layout(book.title, spine_width(hours.get(book.item_id)), height)
+        return Piece(book, KIND_SPINE, layout.width, height)
     return Piece(book, KIND_FACE, FACE_W, USABLE_H)
 
 
@@ -123,15 +131,17 @@ def _slot(pieces, gap=GAP):
     return max(_row_width(pieces, gap), LABEL_MIN)
 
 
-def plan_sections(runs, hours, width=BASE_W, boards=BOARDS, gap=GAP, run_gap=RUN_GAP):
+def plan_sections(runs, hours, width=BASE_W, boards=None, gap=GAP, run_gap=RUN_GAP):
     """Sections -> boards -> [(run, pieces)], packed left to right, top to bottom.
 
     A run that fits on the rest of the board goes there. One that does not moves to the next
     board, but first the hole it leaves is offered to the next few runs (LOOKAHEAD) that fit
     in it, so a long series never leaves a board almost empty. Only a run wider than a whole
     board is split, piece by piece, over as many boards as it needs. An empty shelf is one
-    empty section.
+    empty section. `boards` defaults to BOARDS as it is when called.
     """
+    if boards is None:
+        boards = BOARDS
     queue = [(run, [piece_for(b, hours) for b in run.books]) for run in runs if run.books]
     filled = []
     board = []
@@ -339,35 +349,130 @@ def _shade(rgb, delta):
     return tuple(max(0, min(255, c + delta)) for c in rgb)
 
 
-def _title_font(piece):
-    return font(SERIF, TITLE_SIZE if piece.width >= NARROW_W else TITLE_SIZE_NARROW, 500)
+def _title_font(size):
+    return font(SERIF, size, 500)
+
+
+def _ink_extent(fnt):
+    """(top, bottom) of the font's ink about the baseline: cap or ascender top to descender."""
+    return fnt.getbbox("Hgy", anchor="ls")[1::2]
+
+
+def _line_pitch():
+    top, bottom = _ink_extent(_title_font(TITLE_SIZE_SMALL))
+    return bottom - top + LINE_GAP
+
+
+# baseline to baseline for two lines at TITLE_SIZE_SMALL, about 30 px
+LINE_W = _line_pitch()
+
+
+@functools.lru_cache(maxsize=4096)
+def _advance(fnt, ch):
+    return fnt.getlength(ch)
+
+
+def _approx_width(fnt, text):
+    """The sum of the glyphs' advances, without kerning: cheap once each glyph is known, and
+    within a few px of the real width (each real measurement costs about 0.13 ms here)."""
+    return sum(_advance(fnt, ch) for ch in text)
+
+
+# how far the estimate may be from the room before it alone decides
+FIT_SLACK = 0.08
+
+
+def _fits(text, fnt, room):
+    estimate = _approx_width(fnt, text)
+    if estimate > room * (1 + FIT_SLACK):
+        return False
+    if estimate < room * (1 - FIT_SLACK):
+        return True
+    return text_width(fnt, text) <= room
 
 
 def _fast_ellipsize(text, fnt, max_width):
-    """text.ellipsize's result, found by bisection: a 120-character title costs a handful of
-    width measurements instead of one per character (they are slow on the Pi)."""
-    if text_width(fnt, text) <= max_width:
+    """text.ellipsize's result, found from the glyph advances and then checked against the real
+    width: a 120-character title costs two or three width measurements instead of one per
+    character (they are slow on the Pi)."""
+    if _fits(text, fnt, max_width):
         return text
 
-    def fits(cut):
-        return text_width(fnt, text[:cut].rstrip(" ,;:-") + ELLIPSIS) <= max_width
+    def shown(cut):
+        return text[:cut].rstrip(" ,;:-") + ELLIPSIS
 
-    lo, hi = 0, len(text) - 1
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if fits(mid):
-            lo = mid
-        else:
-            hi = mid - 1
-    while lo > 0 and not fits(lo):
-        lo -= 1
-    return text[:lo].rstrip(" ,;:-") + ELLIPSIS if lo > 0 else ELLIPSIS
+    def fits(cut):
+        return text_width(fnt, shown(cut)) <= max_width
+
+    budget = max_width - _advance(fnt, ELLIPSIS)
+    lo, run = 0, 0.0
+    for ch in text[:-1]:
+        run += _advance(fnt, ch)
+        if run > budget:
+            break
+        lo += 1
+    if lo and fits(lo):
+        while lo + 1 < len(text) and fits(lo + 1):
+            lo += 1
+    else:
+        while lo > 0 and not fits(lo):
+            lo -= 1
+    return shown(lo) if lo > 0 else ELLIPSIS
+
+
+@dataclass(frozen=True)
+class SpineLayout:
+    size: int
+    lines: tuple
+    width: int
+
+
+def _two_lines(words, fnt, room):
+    """Words filled into a first line of at most `room` px (a word longer than that is cut
+    with the ellipsis), the rest on a second line, ellipsized when it does not fit."""
+    first = words[0]
+    rest = words[1:]
+    if not _fits(first, fnt, room):
+        first = _fast_ellipsize(first, fnt, room)
+    else:
+        while rest and _fits(f"{first} {rest[0]}", fnt, room):
+            first = f"{first} {rest[0]}"
+            rest = rest[1:]
+    if not rest:
+        return (first,)
+    return first, _fast_ellipsize(" ".join(rest), fnt, room)
+
+
+@functools.lru_cache(maxsize=2048)
+def spine_layout(title, base_width, height):
+    """How a title sits on a spine `base_width` x `height`, in this order: one line at
+    TITLE_SIZE if it fits the room (the height less TITLE_ROOM) and the spine is NARROW_W or
+    wider; one line at TITLE_SIZE_SMALL; two lines at TITLE_SIZE_SMALL wrapped between words,
+    the second ellipsized when the title is longer still. Two lines widen the spine to
+    2 * LINE_W + 2 * TITLE_PAD. Kept by title and size: packing asks for every book."""
+    words = (title or "").split()
+    text = " ".join(words)
+    room = height - TITLE_ROOM
+    small = _title_font(TITLE_SIZE_SMALL)
+    # what does not fit at the smaller size does not fit at the larger: measure that first
+    one_small = _fits(text, small, room)
+    if one_small and base_width >= NARROW_W and _fits(text, _title_font(TITLE_SIZE), room):
+        return SpineLayout(TITLE_SIZE, (text,), base_width)
+    if one_small or len(words) < 2:
+        return SpineLayout(TITLE_SIZE_SMALL, (_fast_ellipsize(text, small, room),), base_width)
+    lines = _two_lines(words, small, room)
+    if len(lines) == 1:
+        return SpineLayout(TITLE_SIZE_SMALL, lines, base_width)
+    return SpineLayout(TITLE_SIZE_SMALL, lines, max(base_width, 2 * LINE_W + 2 * TITLE_PAD))
+
+
+def _layout_of(piece):
+    return spine_layout(piece.book.title, piece.width, piece.height)
 
 
 def spine_title(piece):
-    """The title as the spine shows it: ellipsized to the spine height minus 60 px."""
-    title = " ".join((piece.book.title or "").split())
-    return _fast_ellipsize(title, _title_font(piece), piece.height - TITLE_ROOM)
+    """The title as the spine shows it, its lines joined by a space."""
+    return " ".join(_layout_of(piece).lines)
 
 
 _SPINES = collections.OrderedDict()
@@ -375,16 +480,19 @@ _SPINES_KEEP = 600
 
 
 def clear_caches():
-    """Forget every drawn spine, label and plan (tests and the self-test time a cold render)."""
+    """Forget every drawn spine, label, plan and title layout (tests and the self-test time a
+    cold render)."""
     _SPINES.clear()
     _PLANS.clear()
     _label_mask.cache_clear()
+    spine_layout.cache_clear()
+    _advance.cache_clear()
 
 
 def draw_spine(piece, colour, theme):
-    """A spine of `piece`'s size: paper edge on top, shaded right edge, the title bottom to top,
-    the author's surname at the top when the spine is 34 px or wider and the whole surname
-    fits beside the title."""
+    """A spine of `piece`'s size: paper edge on top, shaded right edge, the title bottom to top
+    (two lines when spine_layout says so), and on a one-line title the author's surname at the
+    top when the spine is AUTHOR_MIN_W or wider and the whole surname fits beside the title."""
     key = (piece, tuple(colour), theme.name)
     cached = _SPINES.get(key)
     if cached is not None:
@@ -399,14 +507,18 @@ def draw_spine(piece, colour, theme):
     # drawn on a horizontal strip the length of the spine, then turned: left becomes bottom
     strip = Image.new("RGBA", (h, w), (0, 0, 0, 0))
     sd = ImageDraw.Draw(strip)
-    title_font = _title_font(piece)
-    title = spine_title(piece)
-    # centre the ink, not the font's line box: Garamond's descender is deeper than its caps are tall
-    top, bottom = title_font.getbbox("Hgy", anchor="ls")[1::2]
-    baseline = round(w / 2 - (top + bottom) / 2)
-    sd.text((TITLE_PAD, baseline), title, font=title_font, fill=ink, anchor="ls")
+    layout = _layout_of(piece)
+    title_font = _title_font(layout.size)
+    # centre the ink, not the font's line box: Garamond's descender is deeper than its caps are
+    # tall; two lines are centred as one block, the first line on the spine's left
+    top, bottom = _ink_extent(title_font)
+    pitch = LINE_W if len(layout.lines) > 1 else 0
+    baseline = round(w / 2 - (top + bottom + pitch) / 2)
+    for n, line in enumerate(layout.lines):
+        sd.text((TITLE_PAD, baseline + n * LINE_W), line, font=title_font, fill=ink, anchor="ls")
     author = surname(piece.book.author)
-    if author and w >= AUTHOR_MIN_W:
+    if author and w >= AUTHOR_MIN_W and len(layout.lines) == 1:
+        title = layout.lines[0]
         author_font = font(SANS, AUTHOR_SIZE, 500)
         room = h - AUTHOR_PAD - (TITLE_PAD + text_width(title_font, title)) - AUTHOR_GAP
         # the whole surname or nothing: a clipped "Quain..." reads as noise from the desk
@@ -421,7 +533,7 @@ def draw_spine(piece, colour, theme):
 
 
 def draw_face(piece, cover, pct, theme):
-    """A face-out book: the cover fitted 138x138 on a dark plinth, bottom aligned; in progress
+    """A face-out book: the cover fitted COVER x COVER on a dark plinth, bottom aligned; in progress
     (pct not None) adds a notched red ribbon at the cover's top right and a progress line."""
     w, h = piece.width, piece.height
     img = Image.new("RGB", (w, h), theme.bg)

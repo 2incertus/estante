@@ -2,7 +2,7 @@
 """estante-ctl: the conductor that draws Estante on the HDMI framebuffer.
 
 One always-on composition: Now listening on the left, one library as a shelf
-of spines on the right, a section of four boards at a time, turning every
+of spines on the right, a section of three boards at a time, turning every
 `shelf_minutes`. Polls Audiobookshelf, answers Ouvido's /swap (next shelf),
 /show and /badge and Home Assistant's /screen, and writes finished frames to
 /dev/fb0.
