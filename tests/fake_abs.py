@@ -1,6 +1,7 @@
 """A local stand-in for Audiobookshelf that serves the recorded fixtures."""
 import json
 import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,6 +19,8 @@ class FakeAbs:
         self.fail_with = fail_with
         self.calls = []
         self.overrides = {}
+        # path substring -> seconds to wait before answering (a hanging server)
+        self.delays = {}
         self._server = None
         self._thread = None
 
@@ -96,6 +99,9 @@ class FakeAbs:
         parts = urllib.parse.urlsplit(req.path)
         path = parts.path
         self.calls.append(path)
+        for part, seconds in list(self.delays.items()):
+            if part in path:
+                time.sleep(seconds)
         if self.fail_with is not None:
             status, ctype, body = self.fail_with, None, None
         elif req.headers.get("Authorization") != f"Bearer {TOKEN}":

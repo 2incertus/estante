@@ -690,3 +690,96 @@ def test_single_wall_swap_redraws(make_conductor):
     finally:
         server.shutdown()
         server.server_close()
+
+
+# fix round 1
+
+
+def test_failed_swap_keeps_the_shown_wall_until_abs_answers(http, conductor, fake_abs):
+    before = rendered(conductor)
+    fake_abs.fail_with = 500
+    assert http.post("/swap").status == 202
+    wait_until(lambda: conductor._pending is None)
+    time.sleep(0.5)
+    wait_until(lambda: not conductor.snapshot()["busy"])
+    count = render_count(conductor)
+    r = http.post("/badge", {"message_waiting": True, "from": "Jasmine"})
+    assert r.body["redraw"] is True
+    after = renders_after(conductor, count)
+    assert after != before
+    assert region(after, HEADER) == region(before, HEADER)
+    assert http.get("/state").body["wall"] == "audiobooks"
+    count = render_count(conductor)
+    fake_abs.fail_with = None
+    swapped = renders_after(conductor, count)
+    assert http.get("/state").body["wall"] == "light_novels"
+    assert region(swapped, HEADER) != region(before, HEADER)
+
+
+def test_repeated_screen_off_blanks_again(make_conductor, tmp_path):
+    c = make_conductor()
+    rendered(c)
+    c.set_screen(on=False)
+    c.set_screen(on=False)
+    assert c.fb.blank_calls == [True, True]
+    b = make_conductor(fb_cls=NoBlankFramebuffer, fb_name="fb-noblank", state_dir=str(tmp_path / "state-b"))
+    rendered(b)
+    b.set_screen(on=False)
+    with open(b.cfg["fb_file"], "r+b") as f:
+        f.write(b"\xff" * 64)
+    b.set_screen(on=False)
+    assert b.fb.blank_calls == [True, True]
+    assert frame(b) == bytes(1920 * 1080 * 2)
+
+
+def test_screen_on_redraws_when_unblank_is_refused(make_conductor):
+    c = make_conductor(fb_cls=NoBlankFramebuffer)
+    rendered(c)
+    c.set_screen(on=False)
+    assert frame(c) == bytes(1920 * 1080 * 2)
+    count = render_count(c)
+    c.set_screen(on=True)
+    after = renders_after(c, count)
+    assert c.fb.blank_calls == [True, False]
+    assert after != bytes(1920 * 1080 * 2)
+
+
+@pytest.mark.parametrize("walls", [[], {}, "audiobooks", [{"library_id": ""}], [{"name": ""}], ["x"]])
+def test_load_config_rejects_bad_walls(tmp_path, walls):
+    path = tmp_path / "estante.json"
+    path.write_text(json.dumps({"walls": walls}))
+    with pytest.raises(ValueError, match="walls"):
+        estante_ctl.load_config(str(path))
+
+
+def test_hanging_cover_server_stops_the_cover_load(make_conductor, fake_abs, monkeypatch, caplog):
+    monkeypatch.setattr(estante_ctl, "COVER_SLOW_S", 0.05)
+    caplog.set_level(logging.WARNING, logger="estante-ctl")
+    fake_abs.delays["/cover"] = 0.08
+    c = make_conductor(walls=[{"name": "audiobooks", "library_id": ""}])
+    rendered(c)
+    covers = [p for p in fake_abs.calls if p.endswith("/cover")]
+    # the now cover, the 12 recorded wall covers (slow hits), then three slow misses
+    assert len(covers) == 1 + 12 + 3
+    stalls = [r for r in caplog.records if "cover" in r.getMessage()]
+    assert len(stalls) == 1
+    count = render_count(c)
+    c.set_badge({"dnd": True})
+    renders_after(c, count)
+    assert len([p for p in fake_abs.calls if p.endswith("/cover")]) == len(covers)
+
+
+def test_render_errors_are_logged_once_per_error(make_conductor, monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger="estante-ctl")
+
+    def broken(view, size):
+        raise RuntimeError("renderer broke")
+
+    monkeypatch.setattr(estante_ctl, "render_screen", broken)
+    c = make_conductor()
+    wait_until(lambda: any(r.exc_info for r in caplog.records))
+    time.sleep(1.0)
+    assert c.is_alive()
+    failures = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(failures) == 1
+    assert "renderer broke" in str(failures[0].exc_info[1])

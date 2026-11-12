@@ -69,6 +69,10 @@ WALL_TITLES = {"audiobooks": "The shelf", "light_novels": "Light novels"}
 ACTIONS = ("swap", "show", "redraw")
 TICK_S = 0.5
 COVER_LOG_EVERY = 50
+# three misses in a row that each took this long: ABS is hanging, so the
+# cover load stops until the next wall refresh
+COVER_SLOW_S = 2.0
+COVER_SLOW_LIMIT = 3
 DEFAULT_SCREEN = {"on": True, "dim": 1.0}
 
 
@@ -87,8 +91,17 @@ def load_config(path=None):
         cfg.update(loaded)
     if cfg["rotate"] not in (0, 180):
         raise ValueError(f"rotate must be 0 or 180, not {cfg['rotate']!r}")
+    _check_walls(cfg["walls"])
     get_theme(cfg["theme"])
     return cfg
+
+
+def _check_walls(walls):
+    if not isinstance(walls, list) or not walls:
+        raise ValueError(f"walls must be a non-empty list of {{name, library_id}}, not {walls!r}")
+    for entry in walls:
+        if not isinstance(entry, dict) or not isinstance(entry.get("name"), str) or not entry["name"]:
+            raise ValueError(f"every entry of walls needs a non-empty name, not {entry!r}")
 
 
 def state_file(cfg):
@@ -178,7 +191,10 @@ class Conductor(threading.Thread):
         self._resolved = False
         state = read_state(state_path)
         names = [w.name for w in self._walls]
-        self._wall = names.index(state["wall"]) if state.get("wall") in names else 0
+        # _target is the wall asked for; _wall is the wall whose books were last
+        # fetched, the one on screen. They differ while a swap waits for ABS.
+        self._target = names.index(state["wall"]) if state.get("wall") in names else 0
+        self._wall = self._target
         self._screen = self._screen_from_state(state.get("screen"))
         self._pending = None
         self._busy = False
@@ -193,6 +209,8 @@ class Conductor(threading.Thread):
         self._items_at = None
         self._shown = None
         self._abs_problem = None
+        self._render_problem = None
+        self._covers_stalled = False
         # covers of the current wall only, so a swap frees the other wall's images
         self._wall_covers = {}
         self._covers_wall = None
@@ -268,7 +286,7 @@ class Conductor(threading.Thread):
                 if dim is not None:
                     self._screen["dim"] = float(dim)
                 screen = dict(self._screen)
-            if on is False and was["on"]:
+            if on is False:
                 self._power_down()
             elif on is True:
                 self.fb.blank(False)
@@ -345,7 +363,9 @@ class Conductor(threading.Thread):
             with self._lock:
                 self._walls = walls
             self._resolved = True
-        index, wall = self._current_wall()
+        with self._lock:
+            index = self._target
+            wall = self._walls[index]
         nl = pick_now_listening(self.client)
         me = self.client.me()
         refresh = self.cfg["wall_refresh_minutes"] * 60
@@ -355,16 +375,20 @@ class Conductor(threading.Thread):
             or self._items_wall != index
             or now - self._items_at >= refresh
         )
+        items = self.client.library_items(wall.library_id) if items_due else self._items
+        books = build_shelf(items, progress_index(me))
+        # every read succeeded: only now does the screen move to the wall asked for
         if items_due:
-            self._items = self.client.library_items(wall.library_id)
+            self._items = items
             self._items_wall = index
             self._items_at = now
             self._cover_misses.clear()
+            self._covers_stalled = False
             if self._now_cover is not None and self._now_cover[1] is None:
                 self._now_cover = None
-        books = build_shelf(self._items, progress_index(me))
         with self._lock:
             self._nl = nl
+            self._wall = index
         self._me = me
         self._books = books
         shown = (
@@ -388,14 +412,25 @@ class Conductor(threading.Thread):
                 return
             self._abs_ok()
             if changed or force_render:
-                try:
-                    self._render()
-                except Exception:
-                    self._shown = None  # the next poll tries this frame again
-                    raise
+                self._render_guarded()
         finally:
             with self._lock:
                 self._busy = False
+
+    def _render_guarded(self):
+        """Render, logging a failure once per distinct error (traceback the first time)."""
+        try:
+            self._render()
+        except Exception as e:
+            self._shown = None  # the next poll tries this frame again
+            problem = f"{type(e).__name__}: {e}"
+            if problem != self._render_problem:
+                log.exception("render failed, keeping the last frame")
+                self._render_problem = problem
+            return
+        if self._render_problem is not None:
+            log.info("rendering works again")
+            self._render_problem = None
 
     def _load_wall_covers(self, index, books):
         if self._covers_wall != index:
@@ -407,15 +442,28 @@ class Conductor(threading.Thread):
             if (self._wall_covers.get(b.item_id) or (None,))[0] != b.updated_at
             and (b.item_id, b.updated_at) not in self._cover_misses
         ]
+        if self._covers_stalled:
+            todo = []
+        slow_misses = 0
         for n, book in enumerate(todo, 1):
             if self._stop_event.is_set():
                 break
+            started = time.monotonic()
             path = self.covers.path(book.item_id, book.updated_at, width)
             img = load_image(path, square=width) if path else None
             if img is None:
                 self._cover_misses.add((book.item_id, book.updated_at))
                 self._wall_covers.pop(book.item_id, None)
+                slow_misses = slow_misses + 1 if time.monotonic() - started > COVER_SLOW_S else 0
+                if slow_misses >= COVER_SLOW_LIMIT:
+                    log.warning(
+                        "covers: %d slow misses in a row, Audiobookshelf seems to hang; "
+                        "the rest wait for the next wall refresh", slow_misses,
+                    )
+                    self._covers_stalled = True
+                    break
             else:
+                slow_misses = 0
                 self._wall_covers[book.item_id] = (book.updated_at, img)
             if n % COVER_LOG_EVERY == 0:
                 log.info("covers: %d of %d loaded", n, len(todo))
@@ -461,8 +509,9 @@ class Conductor(threading.Thread):
                 self.render_count += 1
 
     def _set_wall(self, index):
+        """Aim at wall `index`; the screen moves to it on the next successful fetch."""
         with self._lock:
-            self._wall = index
+            self._target = index
             name = self._walls[index].name
         log.info("wall: %s", name)
         try:
@@ -474,7 +523,7 @@ class Conductor(threading.Thread):
         now = self.clock()
         if action == "swap":
             with self._lock:
-                index = (self._wall + 1) % len(self._walls)
+                index = (self._target + 1) % len(self._walls)
         if action in ("swap", "show"):
             self._set_wall(index)
             self._poll(now, force_items=True, force_render=True)
@@ -482,7 +531,7 @@ class Conductor(threading.Thread):
         with self._lock:
             self._busy = True
         try:
-            self._render()
+            self._render_guarded()
         finally:
             with self._lock:
                 self._busy = False
@@ -678,7 +727,12 @@ def main(argv=None):
     server.server_close()
     conductor.stop()
     conductor.join(timeout=10)
-    fb.close()
+    if conductor.is_alive():
+        # still blocked in an ABS call: closing the fd under it could let a late
+        # blit land on whatever reuses the descriptor; the process exit closes it
+        log.warning("conductor still busy after 10 s, leaving the framebuffer open")
+    else:
+        fb.close()
     return code
 
 
