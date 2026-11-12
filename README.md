@@ -99,7 +99,7 @@ estante-ctl reads this file (path from `ESTANTE_CONFIG`, set in the service unit
 | `fb_sysfs` | `/sys/class/graphics/fb0` | its sysfs directory: geometry, and `blank` for screen off |
 | `fb_file` | empty | when set, frames go to this regular file instead of the device (development) |
 | `fb_size`, `fb_bpp` | `[1920, 1080]`, `16` | the shape of `fb_file` |
-| `cover_width` | `120` | width of the shelf's cached covers (face-outs and spine colours) |
+| `cover_width` | `160` | width of the shelf's cached covers (face-outs and spine colours); above the 138 px face-out so covers are only ever scaled down |
 | `now_cover_width` | `520` | width of the Now listening cover |
 | `shelf_minutes` | `2` | the shelf turns to its next section this often (not while the screen is off) |
 
@@ -158,7 +158,7 @@ The dry run accepts `--abs-token` because it writes nothing; drop `--library-id`
 
 - The K3 sends no EDID, so the 1920x1080 mode is forced on the kernel command line; until the reboot after the first install the framebuffer is 1024x768 and frames are scaled down to it.
 - The first shelf render fetches every cover of the library from Audiobookshelf, about 300 for the audiobooks (about 600 more for a light-novel wall), a few minutes over WiFi, and computes each spine colour once; after that they come from `/var/lib/estante/covers` and `spines.json`. Until Audiobookshelf has answered once the screen shows the ESTANTE mark.
-- Whether the K3 wakes by itself when the HDMI signal returns after a screen-off still has to be checked on the real panel, along with how the look (both themes, the dim level, the unread fade) reads on it.
+- Whether the K3 wakes by itself when the HDMI signal returns after a screen-off still has to be checked on the real panel, along with how the look (both themes, the dim level) reads on it.
 - The Pi's address is a DHCP lease until it is reserved on the router (see above).
 - The renderer's 3 second budget per frame, and 1.5 seconds for a shelf section alone, are measured by the self-test on the Pi itself. A section is slowest the first time it is drawn (every spine is new); its spines are then kept in memory.
 - Labels of one-book runs are often wider than the book: they are cut short with an ellipsis (`MA…`) rather than overlap the next run.

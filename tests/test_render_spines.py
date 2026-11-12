@@ -361,7 +361,7 @@ def _section_view(library, section=0, books=None, runs=None, colours=None, cover
     if colours is None:
         colours = {b.item_id: spine_colour(None, b.title) for b in books}
     return ShelfSectionView(
-        "The shelf", "Audiobooks, by author", books, runs, hours, pct, covers or {}, colours,
+        "The shelf", "Audiobooks, by series and author", books, runs, hours, pct, covers or {}, colours,
         shelf_counts(books), section, 2, {},
     )
 
@@ -374,7 +374,7 @@ def test_render_section_size_header_and_footer(library):
         assert img.getpixel((W - 1, 1075)) == theme.bg
     n = info["sections"]
     assert info["section"] == 0 and 3 <= n <= 6
-    assert info["subtitle"] == f"Audiobooks, by author  ·  shelf 1 of {n}"
+    assert info["subtitle"] == f"Audiobooks, by series and author  ·  shelf 1 of {n}"
     assert info["first_author"] == "Saenal"
     assert info["footer"] == (
         f"{info['count']} of 311 on this shelf  ·  Saenal to {info['last_author']}  ·  next shelf in 2 min"
@@ -440,12 +440,39 @@ def test_other_size_scales(library):
     assert img.size == (820, 720)
 
 
-def test_one_section_renders_fast_with_cached_colours(library):
-    view = _section_view(library)
+def test_heaviest_section_is_the_one_with_most_spines(library):
+    _, runs, hours, _ = library
+    plan = plan_sections(runs, hours)
+    spines = [
+        sum(1 for board in section for _, pieces in board for p in pieces if p.kind == "spine")
+        for section in plan
+    ]
+    index, count = render_spines.heaviest_section(runs, hours)
+    assert count == max(spines) and spines[index] == count
+    assert index == len(plan) - 1  # the unread tail, all spines
+    assert render_spines.heaviest_section([], {}) == (0, 0)
+
+
+def test_the_heaviest_section_renders_fast_with_cached_colours(library):
+    _, runs, hours, _ = library
+    index, count = render_spines.heaviest_section(runs, hours)
+    assert count >= 80
+    view = _section_view(library, section=index)
     render_spines.clear_caches()
     start = time.perf_counter()
     render_section(view, DARK)
     assert time.perf_counter() - start < 0.3
+
+
+def test_a_metadata_edit_replans():
+    a = _book("1", "One", "Ann Author")
+    runs = _runs_of([a])
+    first = render_spines.planned(runs, {})
+    renamed = [Run(runs[0].key, runs[0].label, runs[0].kind, [_book("1", "One", "Ann Other")])]
+    assert render_spines.planned(renamed, {}) is not first
+    relabelled = [Run(runs[0].key, "SOMETHING ELSE", runs[0].kind, runs[0].books)]
+    assert render_spines.planned(relabelled, {}) is not first
+    assert render_spines.planned(runs, {}) is first
 
 
 def _ink_rows(img):

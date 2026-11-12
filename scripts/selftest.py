@@ -8,9 +8,9 @@ audiobooks shelf, a message badge on), once on the dark theme and once on paper 
 half, with the spine colours computed beforehand as the conductor keeps them cached, turns each
 frame 180 degrees as the installed config does and converts it to 16 bpp framebuffer
 bytes, and times the whole path. Warns when a frame takes longer than the budget (3 s,
-the 3B+ target), and when the first shelf section alone, drawn from scratch with its
-colours cached, takes longer than 1.5 s. When the framebuffer's sysfs directory exists it
-reads its geometry: a depth Estante cannot write fails, a size other than 1920x1080 warns
+the 3B+ target), and when the heaviest shelf section (most spines) alone, drawn from
+scratch with its colours cached, takes longer than 1.5 s. When the framebuffer's sysfs
+directory exists it reads its geometry: a depth Estante cannot write fails, a size other than 1920x1080 warns
 (the HDMI mode is not forced until the reboot after the install). Never writes to the
 screen. Prints `selftest: ok` and exits 0, or prints the first failure and exits 1.
 
@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.join(REPO, "tests"))
 AUDIOBOOKS_ID = "b14de8f5-99a5-4cba-b970-6a2cb65f2993"
 SIZE = (1920, 1080)
 BUDGET_S = 3.0
-# the shelf section alone, spine colours cached, spine images not: the 3B+ target
+# the heaviest shelf section alone, spine colours cached, spine images not: the 3B+ target
 SECTION_BUDGET_S = 1.5
 COVER_WIDTH = 120
 NOW_COVER_WIDTH = 520
@@ -81,7 +81,7 @@ def screen_views(fixtures):
             square=COVER_WIDTH,
         )
         shelf = ShelfSectionView(
-            "The shelf", "Audiobooks, by author", books, runs, hours, pct, loaded, colours,
+            "The shelf", "Audiobooks, by series and author", books, runs, hours, pct, loaded, colours,
             shelf_counts(books), 0, 2, badge,
         )
         yield "dark", ScreenView(now, shelf, DARK)
@@ -123,14 +123,22 @@ def render_and_time(fixtures):
 
 
 def time_section(view):
-    """Seconds for the first shelf section alone, drawn from scratch with the colours cached."""
-    from estante_lib.render_spines import clear_caches, render_section
+    """Seconds for the heaviest shelf section (most spines) alone, drawn from scratch with the
+    colours cached: the slowest frame the shelf has."""
+    import dataclasses
 
+    from estante_lib.render_spines import clear_caches, heaviest_section, render_section
+
+    index, spines = heaviest_section(view.shelf.runs, view.shelf.hours)
+    shelf = dataclasses.replace(view.shelf, section=index)
     clear_caches()
     start = time.perf_counter()
-    _, info = render_section(view.shelf, view.theme)
+    _, info = render_section(shelf, view.theme)
     seconds = time.perf_counter() - start
-    print(f"shelf section 1 of {info['sections']}: {info['count']} books, {seconds:.2f} s")
+    print(
+        f"shelf section {index + 1} of {info['sections']}: {spines} spines, "
+        f"{info['count']} books, {seconds:.2f} s"
+    )
     return seconds
 
 

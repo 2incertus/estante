@@ -96,7 +96,7 @@ def test_preview_against_fake_abs(preview, fake_abs, tmp_path, monkeypatch, caps
     assert "TESTTOKEN" not in printed.out + printed.err
     # GET only, and the covers landed in the state dir's cache
     assert any(p.endswith("/cover") for p in fake_abs.calls)
-    assert list((tmp_path / "state" / "covers").glob("*-w120.jpg"))
+    assert list((tmp_path / "state" / "covers").glob("*-w160.jpg"))
     assert (tmp_path / "state" / "spines.json").is_file()
     assert "shelf 1 of " in printed.out
 

@@ -40,7 +40,9 @@ def test_selftest_ok_without_a_framebuffer(tmp_path):
     assert lines[-1] == "selftest: ok"
     assert any(line.startswith("render ") and line.rstrip().endswith(" s") for line in lines), lines
     assert any("no framebuffer" in line for line in lines)
-    assert any(line.startswith("shelf section 1 of ") and line.endswith(" s") for line in lines), lines
+    timed = [line for line in lines if line.startswith("shelf section ")]
+    # the heaviest section of the fixture shelf: the last of 5, all spines
+    assert len(timed) == 1 and timed[0].startswith("shelf section 5 of 5: ") and " spines, " in timed[0], lines
     assert not any("warning" in line for line in lines)
 
 

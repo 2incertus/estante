@@ -201,9 +201,10 @@ _PLANS_KEEP = 4
 def _fingerprint(runs, hours):
     h = hashlib.sha1()
     for run in runs:
-        h.update(run.key.encode("utf-8", "replace") + b"\0")
+        h.update(f"{run.key}\0{run.label}\0".encode("utf-8", "replace"))
         for b in run.books:
-            h.update(f"{b.item_id}\0{b.status}\0{b.title}\0{hours.get(b.item_id, 0):.4f}\0".encode())
+            line = f"{b.item_id}\0{b.status}\0{b.title}\0{b.author}\0{hours.get(b.item_id, 0):.4f}\0"
+            h.update(line.encode("utf-8", "replace"))
     return h.hexdigest()
 
 
@@ -232,6 +233,16 @@ def section_of(runs, item_id, hours):
 
 def section_count(runs, hours):
     return len(planned(runs, hours))
+
+
+def heaviest_section(runs, hours):
+    """(0-based index, spine count) of the section with the most spines: the slowest to draw."""
+    best = (0, 0)
+    for index, section in enumerate(planned(runs, hours)):
+        spines = sum(1 for board in section for _, pieces in board for p in pieces if p.kind == KIND_SPINE)
+        if spines > best[1]:
+            best = (index, spines)
+    return best
 
 
 # colours

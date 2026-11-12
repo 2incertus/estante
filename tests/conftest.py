@@ -117,6 +117,6 @@ def shelf_view(client, tmp_path):
     ls tests/fixtures/covers | grep -v w400 lists 18 covers, 12 of them in audiobooks.json;
     4 of those have a finished or in-progress record in me.json.
     """
-    view = _shelf_view(client, tmp_path, AUDIOBOOKS_ID, "The shelf", "Audiobooks, by author")
+    view = _shelf_view(client, tmp_path, AUDIOBOOKS_ID, "The shelf", "Audiobooks, by series and author")
     assert len(view.books) == 311 and len(view.colours) == 12 and len(view.covers) == 4
     return view

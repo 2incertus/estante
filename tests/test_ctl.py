@@ -219,7 +219,7 @@ def test_defaults_and_example_config():
     assert d["port"] == 8360
     assert d["walls"] == [{"name": "audiobooks", "library_id": "", "title": "The shelf"}]
     assert d["poll_seconds"] == 60 and d["wall_refresh_minutes"] == 15
-    assert d["cover_width"] == 120 and d["now_cover_width"] == 520
+    assert d["cover_width"] == 160 and d["now_cover_width"] == 520
     assert d["canvas"] == [1920, 1080] and d["rotate"] == 0
     assert d["fb_device"] == "/dev/fb0" and d["fb_sysfs"] == "/sys/class/graphics/fb0"
     assert d["fb_file"] == "" and d["fb_size"] == [1920, 1080] and d["fb_bpp"] == 16
@@ -289,7 +289,7 @@ def test_open_framebuffer_file(tmp_path):
 def test_resolve_walls_default_is_the_audiobooks_shelf(client):
     (wall,) = estante_ctl.resolve_walls(estante_ctl.load_config(None), client)
     assert (wall.name, wall.library_id, wall.title, wall.subtitle) == (
-        "audiobooks", AUDIOBOOKS_ID, "The shelf", "Audiobooks, by author"
+        "audiobooks", AUDIOBOOKS_ID, "The shelf", "Audiobooks, by series and author"
     )
 
 
@@ -297,8 +297,8 @@ def test_resolve_walls_by_library_name(client):
     cfg = dict(estante_ctl.DEFAULTS, walls=TWO_WALLS)
     walls = estante_ctl.resolve_walls(cfg, client)
     assert [(w.name, w.library_id, w.title, w.subtitle) for w in walls] == [
-        ("audiobooks", AUDIOBOOKS_ID, "The shelf", "Audiobooks, by author"),
-        ("light_novels", LIGHT_NOVELS_ID, "Light novels", "Light Novels, by author"),
+        ("audiobooks", AUDIOBOOKS_ID, "The shelf", "Audiobooks, by series and author"),
+        ("light_novels", LIGHT_NOVELS_ID, "Light novels", "Light Novels, by series and author"),
     ]
 
 
@@ -309,7 +309,7 @@ def test_resolve_walls_keeps_ids_and_titles(client):
     )
     (wall,) = estante_ctl.resolve_walls(cfg, client)
     assert (wall.name, wall.library_id, wall.title, wall.subtitle) == (
-        "novels", LIGHT_NOVELS_ID, "Novels", "Light Novels, by author"
+        "novels", LIGHT_NOVELS_ID, "Novels", "Light Novels, by series and author"
     )
 
 
@@ -413,8 +413,12 @@ def test_swap_turns_to_the_next_shelf_and_resets_the_timer(http, conductor):
     shelf = http.get("/state").body["shelf"]
     assert shelf["section"] == 1 and 3 <= shelf["sections"] <= 6
     count = render_count(conductor)
+    deadline = conductor._turn_at
+    time.sleep(0.5)
     r = http.post("/swap")
     assert r.status == 202 and r.body == {"queued": "next_shelf", "section": 2}
+    # the swap restarted the two-minute timer: the deadline moved out by the wait
+    assert conductor._turn_at - deadline >= 0.45
     after = renders_after(conductor, count)
     # one wall stays the unit of library: the swap turns the shelf, not the wall
     assert conductor.snapshot()["wall"] == "audiobooks"
@@ -1079,3 +1083,13 @@ def test_a_turn_is_drawn_once(make_conductor):
     # polls every 0.2 s see nothing new: the turn's frame is the only one before the next turn
     time.sleep(0.8)
     assert render_count(c) - count == 1
+
+
+def test_a_saved_section_past_the_end_clamps_to_the_last(make_conductor, tmp_path):
+    write_state(
+        {"pages": {AUDIOBOOKS_ID: 40}, "shelf_item": IN_PROGRESS_ID}, str(tmp_path / "state" / "state.json")
+    )
+    c = make_conductor(walls=ONE_WALL)
+    rendered(c)
+    shelf = shelf_of(c)
+    assert shelf["section"] == shelf["sections"]

@@ -70,7 +70,7 @@ DEFAULTS = {
     "fb_file": "",
     "fb_size": [1920, 1080],
     "fb_bpp": 16,
-    "cover_width": 120,
+    "cover_width": 160,
     "now_cover_width": 520,
     "shelf_minutes": 2,
 }
@@ -141,7 +141,7 @@ class Wall:
 
     @property
     def subtitle(self):
-        return f"{self.library_name}, by author"
+        return f"{self.library_name}, by series and author"
 
 
 def walls_from_config(cfg):
@@ -509,7 +509,8 @@ class Conductor(threading.Thread):
                 self._section = saved if ok else 0
                 self._section_lib = library_id
             self._sections = max(1, sections)
-            self._section %= self._sections
+            # a shelf that shrank (or an old saved index) lands on its last section
+            self._section = min(self._section, self._sections - 1)
 
     def _maybe_jump(self, nl, now):
         """Once per new book in Now listening, turn to the section that holds it.
