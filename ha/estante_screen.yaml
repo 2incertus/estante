@@ -1,0 +1,90 @@
+# Home Assistant pieces for the Estante screen, as applied on 2026-11-12 to the live HA on the N100.
+# rest_command goes under the existing rest_command: block in configuration.yaml (then rest_command.reload);
+# the automations were created through POST /api/config/automation/config/<id> and live in automations.yaml.
+# Policy: on when input_boolean.office_occupied turns on between 07:00 and 23:30 (dim 0.6 after 19:00),
+# off when it turns off (already debounced 15 min by the office automations), off at 23:30, on at 07:00 if occupied, dim at 19:00.
+rest_command:
+  estante_screen:
+    url: http://192.168.68.76:8360/screen
+    method: POST
+    content_type: application/json
+    payload: '{"on": {{ "true" if on else "false" }}, "dim": {{ dim | default(1.0) }}}'
+automations:
+- id: estante_office_occupied_screen_on
+  alias: 'Estante: Office Occupied --> Screen On'
+  description: Wake the bookshelf screen when the office becomes occupied between 07:00 and 23:30; dim after 19:00.
+  triggers:
+  - entity_id: input_boolean.office_occupied
+    from: 'off'
+    to: 'on'
+    trigger: state
+  conditions:
+  - condition: time
+    after: 07:00:00
+    before: '23:30:00'
+  actions:
+  - action: rest_command.estante_screen
+    data:
+      'on': true
+      dim: '{{ 0.6 if now().hour >= 19 else 1.0 }}'
+  mode: single
+- id: estante_office_empty_screen_off
+  alias: 'Estante: Office Empty --> Screen Off'
+  description: Blank the bookshelf screen when office_occupied clears (already 15 min debounced).
+  triggers:
+  - entity_id: input_boolean.office_occupied
+    from: 'on'
+    to: 'off'
+    trigger: state
+  conditions: []
+  actions:
+  - action: rest_command.estante_screen
+    data:
+      'on': false
+      dim: 1.0
+  mode: single
+- id: estante_night_screen_off
+  alias: 'Estante: Night --> Screen Off'
+  description: Bookshelf screen off at 23:30 regardless of presence.
+  triggers:
+  - at: '23:30:00'
+    trigger: time
+  conditions: []
+  actions:
+  - action: rest_command.estante_screen
+    data:
+      'on': false
+      dim: 1.0
+  mode: single
+- id: estante_morning_screen_on
+  alias: 'Estante: Morning --> Screen On If Occupied'
+  description: Bookshelf screen back on at 07:00 when the office is already occupied.
+  triggers:
+  - at: 07:00:00
+    trigger: time
+  conditions:
+  - condition: state
+    entity_id: input_boolean.office_occupied
+    state: 'on'
+  actions:
+  - action: rest_command.estante_screen
+    data:
+      'on': true
+      dim: 1.0
+  mode: single
+- id: estante_evening_dim
+  alias: 'Estante: Evening --> Dim Screen'
+  description: Dim the bookshelf screen at 19:00 when the office is occupied.
+  triggers:
+  - at: '19:00:00'
+    trigger: time
+  conditions:
+  - condition: state
+    entity_id: input_boolean.office_occupied
+    state: 'on'
+  actions:
+  - action: rest_command.estante_screen
+    data:
+      'on': true
+      dim: 0.6
+  mode: single
