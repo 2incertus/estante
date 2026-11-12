@@ -1,110 +1,149 @@
 # Estante
 
-Estante puts an Audiobookshelf library on a 7.3 inch Spectra 6 e-ink panel on the office bookshelf. Three screens take turns:
+Estante puts Mathias's Audiobookshelf library on a screen on the office bookshelf. One composition stays up all day, 1920x1080:
 
-- **Now listening**: the cover of the audiobook in progress, its title, author, narrator and series, a progress bar with chapter ticks, the current chapter and the time left. With nothing in progress it shows the last finished book under LAST LISTENED, and with no history at all, NOTHING PLAYING.
-- **The shelf**: every book in the Audiobooks library as a tile in shelf order (author, then series, then title), 50 covers to a page (or 32 larger covers, or the whole library on one screen, set per instance). Read books are in colour, the book being listened to has a red frame, unread books are pale grey ghosts.
-- **Light novels**: the same shelf for the Light Novels library.
+- **Now listening**, on the left: the cover of the audiobook in progress, its title, author and narrator, a progress bar with chapter ticks, the current chapter, the time left and how many books were finished this year. With nothing in progress it shows the last finished book under LAST LISTENED, and with no history at all, NOTHING PLAYING. The footer carries the message mark from Ouvido ("Message from Jasmine waiting", or QUIET).
+- **The wall**, on the right: every book of one library as a cover tile in shelf order (author, then series, then title). Read books are in full colour, books being listened to have a red frame, unread books fade toward the background. A line on top counts read, listening and to go; the footer gives the share of the shelf read.
 
-A small conductor service, estante-ctl, rotates the screens (every 30 minutes by default), turns the shelf pages, redraws Now listening when the chapter or progress visibly changes, and takes button presses and the message-waiting mark from the Ouvido daemon on the same Pi. Estante only ever reads Audiobookshelf with GET requests; it never writes progress, marks anything finished or starts a scan.
+A small conductor service, estante-ctl, polls Audiobookshelf every minute, redraws when something on screen changed (and the wall every 15 minutes), and writes finished frames straight to the Linux framebuffer `/dev/fb0`: no X, no browser. Ouvido (the voice daemon on the same Pi) and Home Assistant talk to it over HTTP on port 8360. Estante only ever reads Audiobookshelf with GET requests; it never writes progress, marks anything finished or starts a scan.
 
 ## Hardware
 
-- Pimoroni Inky Impression 7.3" (2025 edition): 800x480, Spectra 6 inks (black, white, yellow, red, blue, green), driven by the `inky` library's `InkyE673` class. A full refresh takes up to about 32 seconds.
-- Raspberry Pi 3B+ running Raspberry Pi OS Bookworm, shared with Ouvido (microphone, blink(1), buttons).
-- Pins: Estante uses SPI0 (BCM 8, 10, 11), DC 22, RESET 27, BUSY 17 and I2C 2/3. Ouvido owns the buttons on BCM 5, 6, 16 and 24.
+- **Screen:** KYY K3 portable monitor (Amazon B088TLQR3K), 15.6 inch IPS, 1920x1080 at 60 Hz. It takes the Pi's HDMI through its mini HDMI port and is powered by its own 5 V USB-C adapter, never from the Pi's USB ports (the 3B+ cannot feed it). It stands on its smart cover rotated 180 degrees, so the installer sets `rotate: 180` and every frame is turned before it is written.
+- **Host:** Raspberry Pi 3B+, Raspberry Pi OS Lite (Trixie, aarch64, Python 3.13), shared with Ouvido's Docker container. HDMI and `/dev/fb0` belong to Estante; Estante uses no GPIO and never touches Ouvido's container or ports.
 
-## How it fits InkyPi
+## The Pi
 
-Estante runs inside [InkyPi](https://github.com/fatihak/InkyPi) (GPL-3.0, tested at commit `df5fac4`) rather than beside it:
-
-- Two InkyPi plugins, `plugins/now_listening` and `plugins/the_shelf`, subclass InkyPi's `BasePlugin`. The shelf plugin is used twice, once per library, so the playlist holds three instances: "Now listening", "The shelf" and "Light novels". Their settings pages are InkyPi's own, at `/plugin/the_shelf` and `/plugin/now_listening`.
-- `plugins/estante_lib` holds everything else: the Audiobookshelf client and cover cache, the shelf model, the shared state file (`/var/lib/estante/state.json`), the Spectra 6 palette and the two renderers. Every image comes out as 800x480 in exactly the six driver colours, so the inky driver's own quantize pass changes nothing and the panel shows what was rendered.
-- `ctl/estante_ctl.py` (the estante-ctl service, port 8360, stdlib only) owns rotation. It asks InkyPi to draw an instance through InkyPi's `POST /display_plugin_instance`, writes the shelf page into the state file before each shelf turn, and polls Audiobookshelf every 5 minutes while Now listening is up.
-- InkyPi's own playlist cycle is parked at its maximum, 24 hours. Every display call from estante-ctl resets InkyPi's timer, so InkyPi's cycle never fires while estante-ctl is running.
-
-## The Ouvido contract
-
-Ouvido calls estante-ctl on the Pi. All calls are POST with a 2 second timeout and no auth, and all three answer 202 at once; the redraw runs in the background because a Spectra 6 refresh takes up to about 32 seconds.
-
-- `http://127.0.0.1:8360/swap`, no body: button C pressed, show the next screen.
-- `http://127.0.0.1:8360/show` with `{"screen":"the_shelf"}`: button C held, show that screen. The screen is an instance name or its slug (`now_listening`, `the_shelf`, `light_novels`).
-- `http://127.0.0.1:8360/badge` with `{"message_waiting":bool,"dnd":bool,"from":"Jasmine"}` and an optional `"count":int`, sent whenever a flag changes. The footer then reads "Message from Jasmine waiting" or shows QUIET.
-- `GET http://127.0.0.1:8360/state` returns `{"screen","screens","badge","busy","last_display","next_rotation","rotate_minutes"}`.
-
-Recado never calls Estante; its waiting message reaches the panel through Ouvido's badge call. Ports on the Pi: InkyPi 80, Estante 8360, Ouvido 8600.
-
-estante-ctl listens on 127.0.0.1 by default. Ouvido's container uses host networking, so loopback reaches it, and the routes have no auth, so nothing else on the network should. Widen `listen` (to `0.0.0.0` or the Pi's LAN address) only if a caller on another machine needs it and the network is trusted.
+- Address `192.168.68.76` (hostname `mathias`), user `admin` with passwordless sudo; the ryzen's key is authorized (`ssh admin@192.168.68.76`).
+- The address is a DHCP lease. **TODO (Mathias):** reserve `192.168.68.76` for the Pi on the router, since Home Assistant calls that address.
+- Ports: 8360 Estante, 8600 Ouvido.
 
 ## Install on the Pi
 
 In this order:
 
-1. Install Ouvido's Docker container first, following Ouvido's own instructions.
-2. Install InkyPi with its own installer, which enables SPI and I2C, then reboot:
+1. Ouvido's container is already installed and running; nothing here touches it.
+2. Refresh the package lists:
 
    ```bash
-   git clone https://github.com/fatihak/InkyPi.git ~/InkyPi
-   cd ~/InkyPi && sudo bash install/install.sh
-   sudo reboot
+   sudo apt-get update
    ```
 
-3. Clone Estante to `/opt/estante` (the repository is private, so the Pi needs a deploy key or a token for this):
+3. Put the checkout at `/opt/estante`, either with git (the repository is private, so the Pi needs a deploy key or a token) or with rsync from the ryzen:
 
    ```bash
-   sudo git clone https://github.com/2incertus/estante.git /opt/estante
+   # on the Pi
+   sudo mkdir -p /opt/estante && sudo chown admin:admin /opt/estante
+   # on the ryzen
+   rsync -a --delete --exclude .venv --exclude out --exclude .claude --exclude .superpowers \
+       ~/estante/ admin@192.168.68.76:/opt/estante/
    ```
 
-4. Run the installer with the Audiobookshelf address and an API token:
+4. Run the installer with an Audiobookshelf API token:
 
    ```bash
    cd /opt/estante
-   sudo scripts/install.sh --abs-url http://192.168.68.86:13378 --abs-token ...
+   sudo scripts/install.sh --abs-token ... [--abs-url http://192.168.68.86:13378] [--rotate 180]
    ```
 
-`scripts/install.sh` is safe to run again; each step says what it did or that it found the work already done. It links the three plugin folders into `/usr/local/inkypi/src/plugins/`, adds `ABS_URL` and `ABS_TOKEN` to InkyPi's `.env` when they are missing (the file behind InkyPi's API Keys page, which sits next to the real InkyPi `src` folder, so `~/InkyPi/.env` after the steps above), creates `/var/lib/estante` and `/etc/estante/estante.json`, restarts InkyPi, sets InkyPi's plugin cycle to 24 hours through its settings form, adds the three playlist instances (looking up the Audiobooks and Light Novels library ids from Audiobookshelf), installs and starts `estante-ctl.service`, and finally runs `scripts/selftest.py` with InkyPi's Python and Pillow. The self-test renders the three screens from the recorded fixtures, never touches the panel, and prints `selftest: ok`.
+5. Reboot when it says `REBOOT NEEDED` (the first run always does): `sudo reboot`.
+
+`scripts/install.sh` is safe to run again; every step prints what it did or that the work was already done, and `--dry-run` prints the whole plan without changing anything (it still looks the library up in Audiobookshelf, which is a GET). The steps:
+
+1. `apt-get install -y` whichever of `python3-venv`, `libopenjp2-7`, `libjpeg62-turbo` and `curl` is missing.
+2. `python3 -m venv /opt/estante/.venv` when absent, then `pip install "pillow>=11"` with `PIP_ONLY_BINARY=:all:`, so Pillow always comes as the aarch64 wheel and is never compiled on the Pi.
+3. `/etc/estante/estante.json`, mode 600: from `ctl/estante.example.json` the first time; on later runs the existing file is kept and only `abs_url`, `abs_token` and `rotate` are set from the flags. The audiobooks wall gets the id of the library named "Audiobooks", looked up through `GET /api/libraries`; the installer stops with the list of libraries when there is none (`--library-id ID` skips the lookup). The token goes to curl on stdin and is never echoed.
+4. `/var/lib/estante/covers`, the state file's directory and the cover cache.
+5. `/boot/firmware/cmdline.txt` gains `video=HDMI-A-1:1920x1080@60D vt.global_cursor_default=0 consoleblank=0` (a parameter already there with another value is replaced in place; the line stays one line). The first edit keeps the original as `cmdline.txt.estante-bak`. The forced mode matters: the K3 sends no EDID, so without it the framebuffer comes up at 1024x768 and only exists while a screen answers.
+6. `systemctl disable --now getty@tty1.service`, so the login console does not draw over the framebuffer.
+7. `ctl/estante-ctl.service` goes to `/etc/systemd/system/` with `/opt/estante` replaced by the real checkout path, then `daemon-reload`, `enable`, `restart`, and a wait of up to 60 seconds for `GET http://127.0.0.1:8360/state` to answer 200.
+8. Whether a reboot is needed (the kernel command line changed).
+9. `scripts/selftest.py` with the venv's Python, then `/state` printed.
+
+Flags: `--abs-token` (required), `--abs-url` (default `http://192.168.68.86:13378`, the N100 on the LAN), `--rotate 180|0` (default 180, with a reminder printed), `--library-id`, `--cmdline-file` (another kernel command line, for tests), `--dry-run`.
+
+The self-test renders the composition from the recorded fixtures through a local fake Audiobookshelf, times each frame (the budget on the 3B+ is 3 seconds; it warns above), and reads the framebuffer's geometry from sysfs: a depth other than 16 or 32 bpp fails, a size other than 1920x1080 warns that the forced mode only applies after the reboot. It never writes to the screen and ends with `selftest: ok`.
+
+Logs: `journalctl -u estante-ctl -f`.
 
 ## /etc/estante/estante.json
 
-estante-ctl reads this file (path from `ESTANTE_CONFIG`, set in the service unit). Missing keys take the defaults shown.
+estante-ctl reads this file (path from `ESTANTE_CONFIG`, set in the service unit). Missing keys take the defaults shown. After editing, `sudo systemctl restart estante-ctl`.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `listen` | `127.0.0.1` | address estante-ctl listens on; loopback is enough for Ouvido (host networking), widen it only for a trusted caller on another machine, as the routes have no auth |
-| `port` | `8360` | its port; Ouvido expects 8360 |
-| `inkypi_url` | `http://127.0.0.1:80` | where InkyPi answers |
-| `inkypi_device_json` | `/usr/local/inkypi/src/config/device.json` | InkyPi's config, read for the playlist's instances |
-| `inkypi_env` | empty | InkyPi's `.env`, read for `ABS_URL` and `ABS_TOKEN`; empty = derived from the real location of InkyPi's src; the installer writes the explicit path |
-| `playlist` | `Default` | the InkyPi playlist whose instances rotate |
-| `rotate_minutes` | `30` | time each screen stays up |
-| `poll_minutes` | `5` | how often Now listening checks Audiobookshelf |
-| `min_redraw_minutes` | `10` | least time between two Now listening redraws |
-| `state_dir` | `/var/lib/estante` | state file and cover cache; the plugins read it here too, so leave it |
+| `listen` | `0.0.0.0` | address the HTTP API listens on; Home Assistant on another machine must reach `/screen`; no auth, LAN only |
+| `port` | `8360` | its port; Ouvido and Home Assistant expect 8360 |
+| `abs_url` | empty | Audiobookshelf base URL; the installer writes `http://192.168.68.86:13378` |
+| `abs_token` | empty | Audiobookshelf API token (read with GET only); the reason the file is mode 600 |
+| `theme` | `dark` | `dark` (near-black, warm off-white type) or `paper` (the e-ink look) |
+| `walls` | the audiobooks wall | ordered list of `{"name", "library_id", "title"}`; an empty `library_id` is resolved from the library whose name matches `name` (`light_novels` matches "Light Novels") |
+| `poll_seconds` | `60` | how often Audiobookshelf is read |
+| `wall_refresh_minutes` | `15` | the wall's library is read again at least this often |
+| `state_dir` | `/var/lib/estante` | `state.json` (wall, badge, screen power) and `covers/` |
+| `canvas` | `[1920, 1080]` | size the composition is drawn at; scaled to the framebuffer when they differ |
+| `rotate` | `0` (installer: `180`) | `0` or `180`; 180 for the monitor standing upside down |
+| `fb_device` | `/dev/fb0` | the framebuffer device |
+| `fb_sysfs` | `/sys/class/graphics/fb0` | its sysfs directory: geometry, and `blank` for screen off |
+| `fb_file` | empty | when set, frames go to this regular file instead of the device (development) |
+| `fb_size`, `fb_bpp` | `[1920, 1080]`, `16` | the shape of `fb_file` |
+| `cover_width` | `120` | width of the wall's cached covers |
+| `now_cover_width` | `520` | width of the Now listening cover |
 
-After editing, run `sudo systemctl restart estante-ctl`.
+A second wall, to swap to by voice:
+
+```json
+"walls": [
+  {"name": "audiobooks", "library_id": "b14de8f5-...", "title": "The shelf"},
+  {"name": "light_novels", "library_id": "", "title": "Light novels"}
+]
+```
+
+## The HTTP contract
+
+All on port 8360, JSON in and out, no auth.
+
+From **Ouvido** (on the Pi, host networking, so `127.0.0.1`):
+
+- `POST /badge` with `{"message_waiting": bool, "dnd": bool, "from": "Jasmine"}` and an optional `"count": int`, sent whenever a flag changes. Answers 202 with the stored badge; the screen redraws when it changed.
+- `POST /screen` with `{"on": bool}`: Ouvido may turn the screen on or off.
+- `POST /swap`, no body: show the next wall. With a single wall it just redraws. 202.
+- `POST /show` with `{"screen": "audiobooks"}` or `{"screen": "light_novels"}` (a wall name or its library id): show that wall. 202, or 404 with the list of walls when there is no such wall.
+
+From **Home Assistant** (`http://192.168.68.76:8360`):
+
+- `POST /screen` with `{"on": bool, "dim": 0..1}`. Off powers the panel down through the framebuffer's `blank` (or paints black when the driver refuses); on wakes it and redraws; `dim` multiplies the frame's brightness (floored at 0.1). Either key may be left out. 202 with the resulting screen state, 400 when a value has the wrong type or range. Power and dim survive a restart.
+
+For anyone:
+
+- `GET /state` returns `{"wall", "walls", "badge", "screen": {"on", "dim"}, "busy", "last_render", "now_listening": {"item_id", "title", "pct"}}`.
+
+## Home Assistant
+
+The policy lives in Home Assistant; the Pi only obeys. A `rest_command.estante_screen` posts `{"on", "dim"}` to `http://192.168.68.76:8360/screen`, and automations on the office presence boolean `input_boolean.office_occupied` drive it: office occupied between 07:00 and 23:30 turns the screen on (dimmed to 0.6 after 19:00), the office empty (the boolean is already debounced by 15 minutes) turns it off, 23:30 turns it off whatever the presence, 07:00 turns it on when the office is already occupied, and 19:00 dims it when occupied. Times are Home Assistant's local time. The reference YAML is applied in its own step after the Pi answers on 8360.
 
 ## Development on the ryzen
 
-The panel is not needed for development. The loop:
+No Pi or screen is needed:
 
 ```bash
-scripts/dev-inkypi.sh                 # one time: clone InkyPi into .inkypi/, build its venv, link the plugins
-.venv/bin/pytest tests                # the whole suite, including InkyPi in dev mode with a mock display
-.venv/bin/python scripts/preview.py --screen shelf   # render from the live Audiobookshelf into out/
-scripts/dev-inkypi.sh run             # InkyPi dev mode on http://127.0.0.1:18080/ against the fixtures
-NODE_PATH=/home/ubuntu/node_modules node scripts/shoot-inkypi.js   # screenshots into out/shots/
+.venv/bin/pytest -q                          # the whole suite, about 40 s
+ESTANTE_STATE_DIR=/tmp/estante/state .venv/bin/python scripts/preview.py \
+    --env ~/config/planetario.env --theme dark --badge --out out --fb-file out/fb.raw
+.venv/bin/python scripts/selftest.py         # what the installer runs on the Pi
+bash scripts/install.sh --dry-run --abs-token "$ABS_TOKEN"   # the install plan, nothing changed
 ```
 
-`scripts/preview.py` reads the token from `~/config/planetario.env` and writes two PNGs per screen: the exact driver colours and an approximation of how the panel looks. `scripts/dev-inkypi.sh run --live` serves InkyPi against the `ABS_URL` and `ABS_TOKEN` in `.inkypi/.env` instead of the fixtures. InkyPi's own `inkypi.py --dev` insists on port 8080, which is taken on the ryzen, so `run` serves the same app on port 18080 and puts the dev checkout's config back when it stops. `scripts/install.sh --dev-http-only` runs just the settings and playlist steps of the installer against that dev server (`INKYPI_URL=http://127.0.0.1:18080`, with `--audiobooks-id` and `--novels-id` when no Audiobookshelf is reachable). `scripts/make_icons.py` redraws the two plugin icons.
+`scripts/preview.py` reads `ABS_URL` and `ABS_TOKEN` from the `--env` file (GET only, the token is never printed) and renders the live composition as estante-ctl would draw it, with the audiobooks wall: `--theme dark|paper`, `--dim 0..1`, `--badge` (a message from Jasmine waiting), `--dnd` (quiet hours). It writes `out/screen-<theme>[-badge][-dnd][-dim].png`. With `--fb-file` it also writes the frame as 1920x1080 RGB565 framebuffer bytes, reads them back, decodes them and prints `fb round trip: ok` when every pixel matches the frame within the 5/6/5 bit rounding. Covers are cached under `$ESTANTE_STATE_DIR/covers` (default `out/state`), so only the first run fetches them. Gallery copies go to `/srv/appdata/html-gallery/ouvido/` (docs.library.icu).
 
 ## Known limits
 
-- The look on the real panel is not verified yet. Every pixel is a driver colour and the driver pass is a no-op in tests, but how Spectra 6 inks read on the shelf has to be checked once the panel arrives.
-- Leave InkyPi's image settings (saturation, contrast, sharpness, brightness) at 1.0. Any other value makes InkyPi blend the image before the driver sees it, and flat areas will dither. The installer sets all four to 1.0 when it saves InkyPi's settings, and the self-test prints a warning if any has drifted since.
-- InkyPi's own daily playlist tick only matters if estante-ctl is dead; then the screens would rotate once a day.
-- Covers come from Audiobookshelf the first time each shelf page is drawn, and a mosaic pulls the whole library at once. The first pass over both libraries fetches about 900 covers (311 audiobooks and 597 light novels), several minutes over WiFi; after that they come from the cache in `/var/lib/estante/covers`. estante-ctl waits up to 10 minutes for InkyPi to finish one draw; a first mosaic slower than that counts as a failed draw, and the screen is tried again on its next turn with the covers fetched so far already cached.
-- Estante screens are landscape only; InkyPi's orientation must stay horizontal.
+- The K3 sends no EDID, so the 1920x1080 mode is forced on the kernel command line; until the reboot after the first install the framebuffer is 1024x768 and frames are scaled down to it.
+- The first wall render fetches every cover of the library from Audiobookshelf, about 300 for the audiobooks (about 600 more for a light-novel wall), a few minutes over WiFi; after that they come from `/var/lib/estante/covers`. Until Audiobookshelf has answered once the screen shows the ESTANTE mark.
+- Whether the K3 wakes by itself when the HDMI signal returns after a screen-off still has to be checked on the real panel, along with how the look (both themes, the dim level, the unread fade) reads on it.
+- The Pi's address is a DHCP lease until it is reserved on the router (see above).
+- The renderer's 3 second budget per frame is measured by the self-test on the Pi itself.
 
 ## License
 
-GPL-3.0, as the plugins subclass InkyPi's GPL-3.0 code. EB Garamond and Inter are under the SIL Open Font License 1.1; the text is in `plugins/estante_lib/fonts/OFL.txt`.
+GPL-3.0 (see `LICENSE`). The InkyPi version this grew from is kept under the git tag `inkypi-v1`. EB Garamond and Inter are under the SIL Open Font License 1.1; the text is in `plugins/estante_lib/fonts/OFL.txt`.
