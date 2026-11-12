@@ -1,15 +1,15 @@
-"""The 1920x1080 composition: Now listening on the left, the cover wall on the right."""
+"""The 1920x1080 composition: Now listening on the left, the shelf of spines on the right."""
 from dataclasses import dataclass
 
 from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageOps
 
 from .render_now import NowListeningView, render_now_column
-from .render_wall import WallView, render_wall
+from .render_spines import ShelfSectionView, render_section
 from .text import SANS, font
 from .theme import Theme
 
 BASE_W, BASE_H = 1920, 1080
-COLUMN_W, WALL_X, WALL_W = 620, 650, 1230
+COLUMN_W, SHELF_X, SHELF_W = 620, 650, 1230
 DIVIDER_X, DIVIDER_Y0, DIVIDER_Y1 = 630, 40, 1040
 DIM_MIN, DIM_MAX = 0.1, 1.0
 
@@ -17,7 +17,7 @@ DIM_MIN, DIM_MAX = 0.1, 1.0
 @dataclass
 class ScreenView:
     now: NowListeningView
-    wall: WallView
+    shelf: ShelfSectionView
     theme: Theme
     dim: float = 1.0
 
@@ -36,7 +36,8 @@ def render_screen(view, size=(BASE_W, BASE_H)):
     canvas.paste(render_now_column(view.now, theme, (p(COLUMN_W), height), s), (0, 0))
     draw = ImageDraw.Draw(canvas)
     draw.line([(p(DIVIDER_X), p(DIVIDER_Y0)), (p(DIVIDER_X), p(DIVIDER_Y1))], fill=theme.muted, width=1)
-    canvas.paste(render_wall(view.wall, theme, (p(WALL_W), height), s), (p(WALL_X), 0))
+    shelf, _ = render_section(view.shelf, theme, (p(SHELF_W), height), s)
+    canvas.paste(shelf, (p(SHELF_X), 0))
     dim = min(DIM_MAX, max(DIM_MIN, float(view.dim)))
     if dim < 1.0:
         canvas = ImageEnhance.Brightness(canvas).enhance(dim)
@@ -59,8 +60,8 @@ def render_mark(theme, size=(BASE_W, BASE_H)):
 def load_image(path, square=None):
     """An RGB copy of the image at `path` (a cached cover), or None when it cannot be read.
 
-    With `square`, centre-cropped to a square of that side, as a wall tile crops it anyway,
-    so a whole library of covers held in memory stays small.
+    With `square`, centre-cropped to a square of that side, as a face-out cover crops it
+    anyway, so the covers held in memory stay small.
     """
     try:
         with Image.open(path) as img:

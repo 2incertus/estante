@@ -40,6 +40,7 @@ def test_selftest_ok_without_a_framebuffer(tmp_path):
     assert lines[-1] == "selftest: ok"
     assert any(line.startswith("render ") and line.rstrip().endswith(" s") for line in lines), lines
     assert any("no framebuffer" in line for line in lines)
+    assert any(line.startswith("shelf section 1 of ") and line.endswith(" s") for line in lines), lines
     assert not any("warning" in line for line in lines)
 
 
@@ -112,7 +113,8 @@ def test_the_timed_path_includes_the_180_degree_rotate(monkeypatch, capsys):
         return real(self, angle, *args, **kwargs)
 
     monkeypatch.setattr(Image.Image, "rotate", rotate)
-    timings = selftest.render_and_time(str(REPO / "tests" / "fixtures"))
+    timings, section = selftest.render_and_time(str(REPO / "tests" / "fixtures"))
+    assert 0 < section < 1.5
     assert angles == [180, 180]
     out = capsys.readouterr().out
     lines = [line for line in out.splitlines() if line.startswith("render ")]

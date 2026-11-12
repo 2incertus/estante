@@ -61,6 +61,15 @@ def test_output_names(preview):
     assert preview.output_name(args) == "screen-dark-badge-dim.png"
     args = preview.parse_args(["--dnd"])
     assert preview.output_name(args) == "screen-dark-dnd.png"
+    args = preview.parse_args(["--section", "2", "--badge"])
+    assert preview.output_name(args) == "screen-dark-s2-badge.png"
+    assert preview.output_name(preview.parse_args(["--section", "1"])) == "screen-dark.png"
+
+
+@pytest.mark.parametrize("section", ["0", "-1", "x"])
+def test_section_counts_from_1(preview, section):
+    with pytest.raises(SystemExit):
+        preview.parse_args(["--section", section])
 
 
 @pytest.mark.parametrize("dim", ["1.5", "-0.1", "x"])
@@ -88,6 +97,20 @@ def test_preview_against_fake_abs(preview, fake_abs, tmp_path, monkeypatch, caps
     # GET only, and the covers landed in the state dir's cache
     assert any(p.endswith("/cover") for p in fake_abs.calls)
     assert list((tmp_path / "state" / "covers").glob("*-w120.jpg"))
+    assert (tmp_path / "state" / "spines.json").is_file()
+    assert "shelf 1 of " in printed.out
+
+
+def test_preview_draws_a_later_section_and_refuses_one_past_the_end(preview, fake_abs, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("ESTANTE_STATE_DIR", str(tmp_path / "state"))
+    env = tmp_path / "abs.env"
+    env.write_text(f"ABS_URL={fake_abs.base_url}\nABS_TOKEN=TESTTOKEN\n")
+    out = tmp_path / "out"
+    assert preview.main(["--env", str(env), "--section", "2", "--out", str(out)]) == 0
+    assert "shelf 2 of " in capsys.readouterr().out
+    assert (out / "screen-dark-s2.png").is_file()
+    assert preview.main(["--env", str(env), "--section", "40", "--out", str(out)]) == 2
+    assert "no shelf section 40" in capsys.readouterr().err
 
 
 def test_preview_fails_cleanly_without_credentials(preview, tmp_path, capsys):

@@ -264,3 +264,130 @@ def visible_key(nl, badge):
         bool(badge.get("message_waiting")),
         bool(badge.get("dnd")),
     )
+
+
+# The shelf of spines: books grouped into runs (one series, or one author's other books)
+
+
+@dataclass
+class Run:
+    key: str
+    label: str
+    kind: str
+    books: list
+
+
+RUN_SERIES = "series"
+RUN_AUTHOR = "author"
+_SERIES_SPLIT_RE = re.compile(r"(?<=[0-9]),\s+")
+
+
+def surname(author):
+    """The first author's last name: "Amir Levine, Md, Rachel Heller" -> "Levine"."""
+    first = (author or "").split(",")[0].split()
+    return first[-1] if first else ""
+
+
+def book_hours(items):
+    """Item id -> duration in hours, from the library items."""
+    return {it["id"]: float((it.get("media") or {}).get("duration") or 0) / 3600 for it in items}
+
+
+def _series_entries(series_name):
+    """[(name, sequence or None)] for every series named in a seriesName."""
+    entries = []
+    for token in _SERIES_SPLIT_RE.split(series_name or ""):
+        m = _SERIES_RE.match(token)
+        if m:
+            name, seq = m.group(1).strip(), float(m.group(2))
+        else:
+            name, seq = token.strip(), None
+        if name:
+            entries.append((name, seq))
+    return entries
+
+
+def _pick_series(entries, members):
+    """The series a book shelves under: numbered first, then the one with most books, then by name."""
+    if not entries:
+        return None
+    numbered = [e for e in entries if e[1] is not None] or entries
+    return min(numbered, key=lambda e: (-members[e[0].lower()], e[0].lower()))
+
+
+def shelf_runs(books, items_by_id, progress):
+    """The shelf as runs, ordered by activity.
+
+    A series run holds the volumes of one series in sequence order (a series with a single
+    volume on the shelf joins its author instead); an author run holds the rest of one
+    author's books by title. Runs with a book in progress come first (latest lastUpdate
+    first), then runs with finished books (latest finishedAt first), then the others by
+    author surname.
+    """
+    entries = {b.item_id: _series_entries(b.series) for b in books}
+    members = {}
+    for found in entries.values():
+        for name in {name.lower() for name, _ in found}:
+            members[name] = members.get(name, 0) + 1
+    picked = {b.item_id: _pick_series(entries[b.item_id], members) for b in books}
+    chosen = {}
+    for pick in picked.values():
+        if pick:
+            chosen[pick[0].lower()] = chosen.get(pick[0].lower(), 0) + 1
+
+    def sort_title(book):
+        md = _metadata(items_by_id.get(book.item_id) or {})
+        return (md.get("titleIgnorePrefix") or book.title or "").lower()
+
+    groups = {}
+    for book in books:
+        pick = picked[book.item_id]
+        if pick and chosen[pick[0].lower()] > 1:
+            key, kind, name = f"{RUN_SERIES}:{pick[0].lower()}", RUN_SERIES, pick[0]
+        else:
+            key, kind, name = f"{RUN_AUTHOR}:{(book.author or '').lower()}", RUN_AUTHOR, book.author
+        group = groups.setdefault(key, {"kind": kind, "name": name, "books": []})
+        group["books"].append((pick[1] if pick and kind == RUN_SERIES else None, book))
+
+    runs = []
+    for key, group in groups.items():
+        if group["kind"] == RUN_SERIES:
+            ordered = sorted(
+                group["books"], key=lambda t: (t[0] is None, t[0] or 0.0, sort_title(t[1]))
+            )
+            members_of = [b for _, b in ordered]
+            read = sum(1 for b in members_of if b.status == STATUS_READ)
+            label = f"{group['name'].upper()} · {read} of {len(members_of)}"
+        else:
+            members_of = sorted((b for _, b in group["books"]), key=sort_title)
+            label = (group["name"] or "").upper()
+        runs.append(Run(key, label, group["kind"], members_of))
+
+    def activity(run):
+        listening = [
+            (progress.get(b.item_id) or {}).get("lastUpdate") or 0
+            for b in run.books if b.status == STATUS_LISTENING
+        ]
+        if listening:
+            return (0, -max(listening), "", run.key)
+        finished = [
+            (progress.get(b.item_id) or {}).get("finishedAt") or 0
+            for b in run.books if b.status == STATUS_READ
+        ]
+        if finished:
+            return (1, -max(finished), "", run.key)
+        author = run.books[0].author if run.books else ""
+        return (2, 0, (surname(author).lower() or _LAST), run.key)
+
+    return sorted(runs, key=activity)
+
+
+def shelf_parts(items, progress):
+    """(books, runs, hours, pct) of one library: what the shelf of spines is drawn from."""
+    books = build_shelf(items, progress)
+    runs = shelf_runs(books, {it["id"]: it for it in items}, progress)
+    pct = {
+        b.item_id: float((progress.get(b.item_id) or {}).get("progress") or 0.0)
+        for b in books if b.status == STATUS_LISTENING
+    }
+    return books, runs, book_hours(items), pct

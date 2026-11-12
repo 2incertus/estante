@@ -3,11 +3,13 @@
 
 Runs with whatever Pillow the interpreter has (on the Pi: /opt/estante/.venv/bin/python).
 Serves tests/fixtures through the local fake Audiobookshelf on 127.0.0.1, renders the
-1920x1080 composition as estante-ctl does (Now listening beside the audiobooks wall, a
-message badge on), once on the dark theme and once on paper dimmed to half, turns each
+1920x1080 composition as estante-ctl does (Now listening beside the first section of the
+audiobooks shelf, a message badge on), once on the dark theme and once on paper dimmed to
+half, with the spine colours computed beforehand as the conductor keeps them cached, turns each
 frame 180 degrees as the installed config does and converts it to 16 bpp framebuffer
-bytes, and times the whole path. Warns when a frame takes longer
-than the budget (3 s, the 3B+ target). When the framebuffer's sysfs directory exists it
+bytes, and times the whole path. Warns when a frame takes longer than the budget (3 s,
+the 3B+ target), and when the first shelf section alone, drawn from scratch with its
+colours cached, takes longer than 1.5 s. When the framebuffer's sysfs directory exists it
 reads its geometry: a depth Estante cannot write fails, a size other than 1920x1080 warns
 (the HDMI mode is not forced until the reboot after the install). Never writes to the
 screen. Prints `selftest: ok` and exits 0, or prints the first failure and exits 1.
@@ -30,6 +32,8 @@ sys.path.insert(0, os.path.join(REPO, "tests"))
 AUDIOBOOKS_ID = "b14de8f5-99a5-4cba-b970-6a2cb65f2993"
 SIZE = (1920, 1080)
 BUDGET_S = 3.0
+# the shelf section alone, spine colours cached, spine images not: the 3B+ target
+SECTION_BUDGET_S = 1.5
 COVER_WIDTH = 120
 NOW_COVER_WIDTH = 520
 DEFAULT_SYSFS = "/sys/class/graphics/fb0"
@@ -44,15 +48,15 @@ def screen_views(fixtures):
 
     from estante_lib.abs import AbsClient, CoverCache
     from estante_lib.model import (
-        build_shelf,
         finished_in_year,
         pick_now_listening,
         progress_index,
         shelf_counts,
+        shelf_parts,
     )
     from estante_lib.render_now import NowListeningView
     from estante_lib.render_screen import ScreenView, load_image
-    from estante_lib.render_wall import WallView
+    from estante_lib.render_spines import ColourCache, ShelfSectionView, shelf_art
     from estante_lib.theme import DARK, PAPER
 
     if not os.path.isdir(fixtures):
@@ -69,16 +73,19 @@ def screen_views(fixtures):
         year = datetime.now(timezone.utc).year
         now = NowListeningView(nl, cover, finished_in_year(me, year, timezone.utc), year, badge)
 
-        books = build_shelf(client.library_items(AUDIOBOOKS_ID), progress_index(me))
-        loaded = {}
-        for book in books:
-            path = covers.path(book.item_id, book.updated_at, COVER_WIDTH)
-            img = load_image(path, square=COVER_WIDTH) if path else None
-            if img is not None:
-                loaded[book.item_id] = img
-        wall = WallView("The shelf", "Audiobooks, by author", books, loaded, shelf_counts(books))
-        yield "dark", ScreenView(now, wall, DARK)
-        yield "paper dimmed", ScreenView(now, wall, PAPER, 0.5)
+        books, runs, hours, pct = shelf_parts(client.library_items(AUDIOBOOKS_ID), progress_index(me))
+        loaded, colours = shelf_art(
+            books,
+            lambda b: covers.path(b.item_id, b.updated_at, COVER_WIDTH),
+            ColourCache(os.path.join(tmp, "spines.json")),
+            square=COVER_WIDTH,
+        )
+        shelf = ShelfSectionView(
+            "The shelf", "Audiobooks, by author", books, runs, hours, pct, loaded, colours,
+            shelf_counts(books), 0, 2, badge,
+        )
+        yield "dark", ScreenView(now, shelf, DARK)
+        yield "paper dimmed", ScreenView(now, shelf, PAPER, 0.5)
 
 
 def check(name, img):
@@ -95,7 +102,9 @@ def render_and_time(fixtures):
 
     info = FbInfo(SIZE[0], SIZE[1], 16, SIZE[0] * 2)
     timings = []
+    last = None
     for name, view in screen_views(fixtures):
+        last = view
         start = time.perf_counter()
         img = render_screen(view, SIZE)
         composed = time.perf_counter()
@@ -110,7 +119,19 @@ def render_and_time(fixtures):
             f"{seconds - (composed - start):.2f} s, total {seconds:.2f} s"
         )
         timings.append((name, seconds))
-    return timings
+    return timings, time_section(last)
+
+
+def time_section(view):
+    """Seconds for the first shelf section alone, drawn from scratch with the colours cached."""
+    from estante_lib.render_spines import clear_caches, render_section
+
+    clear_caches()
+    start = time.perf_counter()
+    _, info = render_section(view.shelf, view.theme)
+    seconds = time.perf_counter() - start
+    print(f"shelf section 1 of {info['sections']}: {info['count']} books, {seconds:.2f} s")
+    return seconds
 
 
 def check_framebuffer(sysfs):
@@ -142,12 +163,17 @@ def main(argv=None):
     try:
         import PIL
 
-        timings = render_and_time(args.fixtures)
+        timings, section = render_and_time(args.fixtures)
         print(f"rendered {', '.join(name for name, _ in timings)} with Pillow {PIL.__version__}")
         name, slowest = max(timings, key=lambda t: t[1])
         if slowest > args.budget:
             warnings.append(
                 f"selftest: warning: render {name} took {slowest:.2f} s, over the {args.budget:.1f} s budget"
+            )
+        if section > SECTION_BUDGET_S:
+            warnings.append(
+                f"selftest: warning: a shelf section took {section:.2f} s, "
+                f"over the {SECTION_BUDGET_S:.1f} s budget"
             )
         warning = check_framebuffer(args.sysfs)
         if warning:

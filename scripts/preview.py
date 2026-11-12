@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""Render the live Estante screen (Now listening beside the audiobooks wall) into a PNG.
+"""Render the live Estante screen (Now listening beside the audiobooks shelf) into a PNG.
 
 GET requests only. The Audiobookshelf address and token come from the --env file
 (ABS_URL, ABS_TOKEN); the token is never printed or written anywhere. The composition
 is the one estante-ctl draws: the wall resolved by name as the conductor resolves it,
 covers at the conductor's widths, cached under $ESTANTE_STATE_DIR/covers (default
-out/state) so a second run fetches nothing. Writes `screen-<theme>[-badge][-dnd][-dim].png`
-into --out. With --fb-file it also writes the frame as 1920x1080 16 bpp framebuffer bytes
+out/state) with the spine colours in spines.json beside them, so a second run fetches and
+computes nothing. --section N draws shelf section N (1-based). Writes
+`screen-<theme>[-sN][-badge][-dnd][-dim].png` into --out (-sN for sections after the
+first). With --fb-file it also writes the frame as 1920x1080 16 bpp framebuffer bytes
 through FileFramebuffer, reads them back, decodes the RGB565 and checks every pixel
 against the frame within the 5/6/5 bit rounding.
 
 Usage:
     ESTANTE_STATE_DIR=/tmp/estante/state .venv/bin/python scripts/preview.py \\
-        --env ~/config/planetario.env --theme dark --badge --out out --fb-file out/fb.raw
+        --env ~/config/planetario.env --theme dark --section 2 --badge --out out --fb-file out/fb.raw
 """
 import argparse
 import os
@@ -29,15 +31,15 @@ import estante_ctl  # noqa: E402
 from estante_lib.abs import AbsClient, AbsError, CoverCache, creds_from_env  # noqa: E402
 from estante_lib.display_fb import FbInfo, FileFramebuffer  # noqa: E402
 from estante_lib.model import (  # noqa: E402
-    build_shelf,
     finished_in_year,
     pick_now_listening,
     progress_index,
     shelf_counts,
+    shelf_parts,
 )
 from estante_lib.render_now import NowListeningView  # noqa: E402
 from estante_lib.render_screen import ScreenView, load_image, render_screen, to_fb_bytes  # noqa: E402
-from estante_lib.render_wall import WallView  # noqa: E402
+from estante_lib.render_spines import ColourCache, ShelfSectionView, section_count, shelf_art  # noqa: E402
 from estante_lib.state import DEFAULT_BADGE  # noqa: E402
 from estante_lib.theme import THEMES, get_theme  # noqa: E402
 
@@ -71,11 +73,22 @@ def _dim(value):
     return dim
 
 
+def _section(value):
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a section number: {value}") from None
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"sections count from 1, not {value}")
+    return n
+
+
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--env", default="~/config/planetario.env", help="file with ABS_URL and ABS_TOKEN")
     ap.add_argument("--theme", choices=sorted(THEMES), default="dark")
     ap.add_argument("--dim", type=_dim, default=1.0, help="brightness 0..1, as Home Assistant sends it")
+    ap.add_argument("--section", type=_section, default=1, help="shelf section to draw, from 1")
     ap.add_argument("--badge", action="store_true", help="a message waiting from Jasmine")
     ap.add_argument("--dnd", action="store_true", help="quiet hours")
     ap.add_argument("--out", default="out")
@@ -85,6 +98,8 @@ def parse_args(argv=None):
 
 def output_name(args):
     name = f"screen-{args.theme}"
+    if args.section > 1:
+        name += f"-s{args.section}"
     if args.badge:
         name += "-badge"
     if args.dnd:
@@ -103,8 +118,9 @@ def make_badge(args):
     return badge
 
 
-def compose(client, covers, theme, badge, dim):
-    """The screen estante-ctl would draw now, from the live Audiobookshelf."""
+def compose(client, covers, colours, theme, badge, dim, section=1):
+    """The screen estante-ctl would draw now, from the live Audiobookshelf; ValueError when
+    `section` (1-based) is past the last one."""
     cfg = dict(estante_ctl.DEFAULTS, walls=[dict(WALL)])
     wall = estante_ctl.resolve_walls(cfg, client)[0]
     nl = pick_now_listening(client)
@@ -115,19 +131,27 @@ def compose(client, covers, theme, badge, dim):
         now_cover = load_image(path) if path else None
     local = datetime.now().astimezone()
     now_view = NowListeningView(nl, now_cover, finished_in_year(me, local.year, local.tzinfo), local.year, badge)
-    books = build_shelf(client.library_items(wall.library_id), progress_index(me))
+    books, runs, hours, pct = shelf_parts(client.library_items(wall.library_id), progress_index(me))
+    sections = section_count(runs, hours)
+    if section > sections:
+        raise ValueError(f"no shelf section {section}: the shelf has {sections}")
     width = cfg["cover_width"]
-    loaded = {}
-    for n, book in enumerate(books, 1):
-        path = covers.path(book.item_id, book.updated_at, width)
-        img = load_image(path, square=width) if path else None
-        if img is not None:
-            loaded[book.item_id] = img
-        if n % 100 == 0:
-            print(f"covers: {n} of {len(books)}", flush=True)
-    print(f"{wall.title}: {len(books)} books, {len(loaded)} covers")
-    wall_view = WallView(wall.title, wall.subtitle, books, loaded, shelf_counts(books))
-    return render_screen(ScreenView(now_view, wall_view, theme, dim), SIZE)
+    seen = []
+
+    def path_of(book):
+        seen.append(book)
+        if len(seen) % 100 == 0:
+            print(f"covers: {len(seen)} of {len(books)}", flush=True)
+        return covers.path(book.item_id, book.updated_at, width)
+
+    loaded, rgb = shelf_art(books, path_of, colours, square=width)
+    print(f"{wall.title}: {len(books)} books, {len(rgb)} spine colours, {len(loaded)} face-out covers")
+    shelf_view = ShelfSectionView(
+        wall.title, wall.subtitle, books, runs, hours, pct, loaded, rgb, shelf_counts(books),
+        section - 1, cfg.get("shelf_minutes", 2), badge,
+    )
+    print(f"shelf {section} of {sections}")
+    return render_screen(ScreenView(now_view, shelf_view, theme, dim), SIZE)
 
 
 def decode_rgb565(data, size):
@@ -168,8 +192,9 @@ def main(argv=None):
     state_dir = os.environ.get("ESTANTE_STATE_DIR") or os.path.join(args.out, "state")
     client = AbsClient(url, token)
     covers = CoverCache(os.path.join(state_dir, "covers"), client)
+    colours = ColourCache(os.path.join(state_dir, "spines.json"))
     try:
-        img = compose(client, covers, get_theme(args.theme), make_badge(args), args.dim)
+        img = compose(client, covers, colours, get_theme(args.theme), make_badge(args), args.dim, args.section)
     except (AbsError, ValueError) as e:
         print(str(e), file=sys.stderr)
         return 2

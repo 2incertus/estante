@@ -1,0 +1,465 @@
+"""The shelf of spines: runs by series and author, packing into sections, spines and face-outs."""
+import json
+import time
+
+import pytest
+from PIL import Image, ImageDraw
+
+from estante_lib import render_spines
+from estante_lib.model import (
+    STATUS_LISTENING,
+    STATUS_READ,
+    STATUS_UNREAD,
+    Run,
+    ShelfBook,
+    book_hours,
+    build_shelf,
+    progress_index,
+    shelf_counts,
+    shelf_runs,
+    surname,
+)
+from estante_lib.render_spines import (
+    BOARD_COLOUR,
+    BOARD_Y,
+    LABEL_COLOUR,
+    PLINTH,
+    USABLE_H,
+    ColourCache,
+    Piece,
+    ShelfSectionView,
+    draw_face,
+    draw_spine,
+    piece_for,
+    plan_sections,
+    render_section,
+    section_of,
+    spine_colour,
+    spine_title,
+)
+from estante_lib.text import ELLIPSIS
+from estante_lib.theme import DARK, PAPER
+
+W = 1230
+OVERGEARED = "4aa1594d-b6ce-441f-9ab3-951ff1340009"
+
+
+def _book(item_id, title="t", author="Ann Author", series="", status=STATUS_UNREAD):
+    return ShelfBook(item_id, title, author, series, 1, status)
+
+
+def _item(book, duration=36000, title_ignore=None):
+    return {
+        "id": book.item_id,
+        "media": {
+            "duration": duration,
+            "metadata": {
+                "title": book.title,
+                "titleIgnorePrefix": title_ignore or book.title,
+                "authorName": book.author,
+                "seriesName": book.series,
+            },
+        },
+    }
+
+
+def _runs_of(books, progress=None, durations=None):
+    items = {b.item_id: _item(b, (durations or {}).get(b.item_id, 36000)) for b in books}
+    return shelf_runs(books, items, progress or {})
+
+
+@pytest.fixture(scope="module")
+def library():
+    from conftest import FIXTURES
+
+    items = json.loads((FIXTURES / "audiobooks.json").read_text())["results"]
+    me = json.loads((FIXTURES / "me.json").read_text())
+    progress = progress_index(me)
+    books = build_shelf(items, progress)
+    runs = shelf_runs(books, {it["id"]: it for it in items}, progress)
+    return books, runs, book_hours(items), progress
+
+
+# runs
+
+
+def test_fixture_runs_lead_with_the_books_in_progress(library):
+    _, runs, _, _ = library
+    # in-progress records by lastUpdate, newest first (me.json, isFinished false, progress > 0.01):
+    # Overgeared (Park Saenal, no series), Shadow Slave 5 (A Slave of the Shadows #5),
+    # The Eye of the World (The Wheel of Time #1), Infinite Mage (Kim Chi-Woo, no series),
+    # 05 The Renaissance (The Story of Civilization #5), Dungeon Crawler Carl (#1)
+    assert [r.key for r in runs[:6]] == [
+        "author:park saenal",
+        "series:a slave of the shadows",
+        "series:the wheel of time",
+        "author:kim chi-woo",
+        "series:the story of civilization",
+        "series:dungeon crawler carl",
+    ]
+    assert [r.kind for r in runs[:3]] == ["author", "series", "series"]
+
+
+def test_series_run_in_sequence_order_with_its_label(library):
+    _, runs, _, _ = library
+    wot = next(r for r in runs if r.key == "series:the wheel of time")
+    # jq '[.results[]|select(.media.metadata.seriesName|test("The Wheel of Time #"))]|length' -> 15,
+    # all finished except #1 The Eye of the World (progress 0.0106)
+    assert len(wot.books) == 15
+    assert [b.title for b in wot.books[:3]] == ["New Spring", "The Eye of the World", "The Great Hunt"]
+    assert wot.books[-1].title == "A Memory of Light"
+    assert wot.label == "THE WHEEL OF TIME · 14 of 15"
+
+
+def test_every_book_lands_in_exactly_one_run(library):
+    books, runs, _, _ = library
+    placed = [b.item_id for r in runs for b in r.books]
+    assert sorted(placed) == sorted(b.item_id for b in books)
+    assert len(placed) == 311
+
+
+def test_single_volume_series_joins_its_author_and_author_runs_sort_by_title():
+    books = [
+        _book("1", "Zeta", "Ann Author", "Lonely Saga #3"),
+        _book("2", "Alpha", "Ann Author"),
+        _book("3", "Two", "Bob Other", "Pair #2"),
+        _book("4", "One", "Bob Other", "Pair #1"),
+    ]
+    runs = _runs_of(books)
+    assert [(r.key, r.kind, [b.title for b in r.books]) for r in runs] == [
+        ("author:ann author", "author", ["Alpha", "Zeta"]),
+        ("series:pair", "series", ["One", "Two"]),
+    ]
+    assert runs[0].label == "ANN AUTHOR"
+    assert runs[1].label == "PAIR · 0 of 2"
+
+
+def test_a_book_in_two_series_joins_the_numbered_larger_one():
+    books = [
+        _book("1", "B1", "J", "Harry Potter #1, Harry Potter (Full-Cast Editions) #1"),
+        _book("2", "B2", "J", "Harry Potter (Full-Cast Editions) #2, Harry Potter #2"),
+        _book("3", "W1", "S", "The Stormlight Archive #3, The Cosmere"),
+        _book("4", "W2", "S", "The Stormlight Archive #4, The Cosmere"),
+    ]
+    runs = _runs_of(books)
+    assert {r.key: [b.title for b in r.books] for r in runs} == {
+        "series:harry potter": ["B1", "B2"],
+        "series:the stormlight archive": ["W1", "W2"],
+    }
+
+
+def test_activity_order_then_surname():
+    books = [
+        _book("a", "A", "Zed Zulu"),
+        _book("b", "B", "Amy Adams"),
+        _book("c", "C", "Max Mid", status=STATUS_READ),
+        _book("d", "D", "Old Read", status=STATUS_READ),
+        _book("e", "E", "Now Listening", status=STATUS_LISTENING),
+    ]
+    progress = {
+        "c": {"isFinished": True, "finishedAt": 500, "lastUpdate": 500},
+        "d": {"isFinished": True, "finishedAt": 100, "lastUpdate": 900},
+        "e": {"isFinished": False, "progress": 0.4, "lastUpdate": 50},
+    }
+    runs = _runs_of(books, progress)
+    assert [r.books[0].item_id for r in runs] == ["e", "c", "d", "b", "a"]
+
+
+def test_surname():
+    assert surname("Robert Jordan") == "Jordan"
+    assert surname("Amir Levine, Md, Rachel Heller") == "Levine"
+    assert surname("") == ""
+
+
+# pieces and packing
+
+
+def test_pieces_spines_for_unread_faces_for_read_and_listening():
+    hours = {"u": 10.0, "r": 10.0, "l": 10.0, "long": 100.0, "short": 0.1}
+    assert piece_for(_book("u"), hours).kind == "spine"
+    assert piece_for(_book("r", status=STATUS_READ), hours).kind == "face"
+    face = piece_for(_book("l", status=STATUS_LISTENING), hours)
+    assert (face.kind, face.width, face.height) == ("face", 150, USABLE_H)
+    # 18 + hours * 0.9, clamped to 22..52
+    assert piece_for(_book("u"), hours).width == 27
+    assert piece_for(_book("long"), hours).width == 52
+    assert piece_for(_book("short"), hours).width == 22
+    assert piece_for(_book("missing"), {}).width == 22
+
+
+def test_spine_heights_are_deterministic_and_vary():
+    heights = [piece_for(_book(f"id-{i}"), {}).height for i in range(200)]
+    assert all(178 <= h <= 206 for h in heights)
+    assert len(set(heights)) > 15
+    again = [piece_for(_book(f"id-{i}"), {}).height for i in range(200)]
+    assert heights == again
+
+
+def _placements(sections):
+    for s, section in enumerate(sections):
+        for b, board in enumerate(section):
+            for run, pieces in board:
+                yield s, b, run, pieces
+
+
+def _board_width(board, gap=2, run_gap=14):
+    x = 0
+    for i, (_, pieces) in enumerate(board):
+        if i:
+            x += run_gap
+        x += max(40, sum(p.width for p in pieces) + gap * (len(pieces) - 1))
+    return x
+
+
+def test_fixture_packs_into_three_to_six_sections_without_overflow(library):
+    books, runs, hours, _ = library
+    sections = plan_sections(runs, hours)
+    assert 3 <= len(sections) <= 6
+    assert all(1 <= len(section) <= 4 for section in sections)
+    for section in sections:
+        for board in section:
+            assert board and _board_width(board) <= W
+    # every book exactly once; a run moves up at most LOOKAHEAD places to fill a board's hole
+    order = [p.book.item_id for _, _, _, pieces in _placements(sections) for p in pieces]
+    assert sorted(order) == sorted(b.item_id for b in books)
+    run_order = list(dict.fromkeys(run.key for _, _, run, _ in _placements(sections)))
+    for placed_at, key in enumerate(run_order):
+        planned_at = [r.key for r in runs].index(key)
+        assert planned_at - placed_at <= render_spines.LOOKAHEAD
+    assert run_order[:2] == ["author:park saenal", "author:kim chi-woo"]
+    assert plan_sections(runs, hours) == sections
+
+
+def test_runs_that_fit_a_board_are_never_split(library):
+    _, runs, hours, _ = library
+    sections = plan_sections(runs, hours)
+    seen = {}
+    for s, b, run, pieces in _placements(sections):
+        seen.setdefault(run.key, []).append((s, b))
+    for run in runs:
+        width = sum(piece_for(bk, hours).width for bk in run.books) + 2 * (len(run.books) - 1)
+        if width <= W:
+            assert len(seen[run.key]) == 1, run.key
+
+
+def test_a_run_wider_than_a_board_wraps_onto_the_next():
+    wide = Run("series:wide", "WIDE · 30 of 30", "series", [_book(f"w{i}", status=STATUS_READ) for i in range(30)])
+    small = Run("author:s", "S", "author", [_book("s1")])
+    sections = plan_sections([small, wide], {})
+    boards = [board for section in sections for board in section]
+    # 30 face-outs at 150 px with 2 px gaps: 8 per board after the first (8 * 152 - 2 = 1214)
+    frags = [len(pieces) for board in boards for run, pieces in board if run.key == "series:wide"]
+    assert sum(frags) == 30 and len(frags) == 4
+    assert all(_board_width(board) <= W for board in boards)
+
+
+def test_empty_library_is_one_empty_section():
+    assert plan_sections([], {}) == [[]]
+    assert section_of([], "x", {}) is None
+
+
+def test_section_of(library):
+    _, runs, hours, _ = library
+    sections = plan_sections(runs, hours)
+    assert section_of(runs, OVERGEARED, hours) == 0
+    last = sections[-1][-1][-1][1][-1].book.item_id
+    assert section_of(runs, last, hours) == len(sections) - 1
+    assert section_of(runs, "nope", hours) is None
+
+
+# colours
+
+
+def test_spine_colour_prefers_saturated_and_skips_white():
+    img = Image.new("RGB", (120, 120), (250, 250, 250))
+    ImageDraw.Draw(img).rectangle([0, 0, 59, 119], fill=(30, 60, 170))
+    r, g, b = spine_colour(img, "x")
+    assert b > 140 and r < 70
+    red = spine_colour(Image.new("RGB", (60, 60), (190, 30, 30)), "x")
+    assert red[0] > 150 and red[1] < 60
+    a, again, other = spine_colour(None, "Dune"), spine_colour(None, "Dune"), spine_colour(None, "Emma")
+    assert a == again and a != other
+    assert max(a) < 200 and max(a) - min(a) < 120
+
+
+def test_colour_cache_persists_and_follows_updated_at(tmp_path):
+    cover = tmp_path / "c.jpg"
+    Image.new("RGB", (60, 60), (190, 30, 30)).save(cover)
+    path = tmp_path / "spines.json"
+    cache = ColourCache(str(path))
+    rgb = cache.get("i1", 5, str(cover))
+    assert rgb[0] > 150
+    assert cache.get("i2", 5, None) is None
+    cache.save()
+    stored = json.loads(path.read_text())
+    assert stored["i1"]["updated_at"] == 5 and tuple(stored["i1"]["rgb"]) == rgb
+    cover.unlink()
+    again = ColourCache(str(path))
+    assert again.get("i1", 5, str(cover)) == rgb  # from the file, the cover is not read again
+    Image.new("RGB", (60, 60), (30, 30, 190)).save(cover)
+    assert again.get("i1", 6, str(cover))[2] > 150
+    junk = tmp_path / "junk.jpg"
+    junk.write_bytes(b"no")
+    assert again.get("i3", 1, str(junk)) is None
+    (tmp_path / "bad.json").write_text("[1")
+    assert ColourCache(str(tmp_path / "bad.json")).get("i1", 5, None) is None
+
+
+# drawing
+
+
+def _count(img, colour, tol=10):
+    return sum(n for n, c in img.getcolors(1 << 20) if all(abs(a - b) <= tol for a, b in zip(c, colour)))
+
+
+def test_spine_carries_its_title_and_author():
+    # Garamond 22 "Dune Messiah" is about 115 px, inside the 200 - 60 px the title may take
+    piece = Piece(_book("s", "Dune Messiah", "Frank Herbert"), "spine", 40, 200)
+    img = draw_spine(piece, (40, 60, 120), DARK)
+    assert img.size == (40, 200)
+    assert _count(img, (245, 242, 232), tol=40) > 80  # off-white type on a dark spine
+    assert spine_title(piece) == "Dune Messiah"
+    light = draw_spine(piece, (230, 210, 160), DARK)
+    assert _count(light, (28, 26, 24), tol=40) > 80
+
+
+def test_long_title_is_ellipsized_inside_the_spine():
+    title = ("A very long title that keeps going " * 4)[:120]
+    piece = Piece(_book("s", title, ""), "spine", 22, 180)
+    assert spine_title(piece).endswith(ELLIPSIS)
+    img = draw_spine(piece, (40, 60, 120), DARK)
+    ink = img.convert("L").point(lambda v: 255 if v > 180 else 0)
+    box = ink.getbbox()
+    assert box is not None
+    x0, y0, x1, y1 = box
+    # the type stays clear of the long edges and of the top 50 px; nothing is cut at the spine's ends
+    assert x0 >= 1 and x1 <= 21
+    assert y0 >= 50 and y1 <= 180 - 4
+
+
+def test_face_out_listening_has_ribbon_and_progress_read_has_neither():
+    cover = Image.new("RGB", (120, 120), (90, 140, 90))
+    listening = Piece(_book("l", status=STATUS_LISTENING), "face", 150, USABLE_H)
+    img = draw_face(listening, cover, 0.5, DARK)
+    assert img.size == (150, USABLE_H)
+    assert _count(img, DARK.accent, tol=4) > 12 * 50
+    base = img.crop((6, USABLE_H - 6, 144, USABLE_H - 2))
+    assert _count(base, DARK.accent, tol=4) >= 60 * 3
+    read = draw_face(Piece(_book("r", status=STATUS_READ), "face", 150, USABLE_H), cover, None, DARK)
+    assert _count(read, DARK.accent, tol=4) == 0
+    assert _count(read, PLINTH, tol=2) > 0
+    assert _count(read, (90, 140, 90), tol=8) > 130 * 130
+    missing = draw_face(Piece(_book("m", "Dune", status=STATUS_READ), "face", 150, USABLE_H), None, None, PAPER)
+    assert _count(missing, spine_colour(None, "Dune"), tol=2) > 130 * 130
+
+
+def _section_view(library, section=0, books=None, runs=None, colours=None, covers=None):
+    all_books, all_runs, hours, progress = library
+    books = all_books if books is None else books
+    runs = all_runs if runs is None else runs
+    pct = {b.item_id: (progress.get(b.item_id) or {}).get("progress") or 0.0 for b in books}
+    if colours is None:
+        colours = {b.item_id: spine_colour(None, b.title) for b in books}
+    return ShelfSectionView(
+        "The shelf", "Audiobooks, by author", books, runs, hours, pct, covers or {}, colours,
+        shelf_counts(books), section, 2, {},
+    )
+
+
+def test_render_section_size_header_and_footer(library):
+    view = _section_view(library)
+    for theme in (DARK, PAPER):
+        img, info = render_section(view, theme)
+        assert img.size == (W, 1080) and img.mode == "RGB"
+        assert img.getpixel((W - 1, 1075)) == theme.bg
+    n = info["sections"]
+    assert info["section"] == 0 and 3 <= n <= 6
+    assert info["subtitle"] == f"Audiobooks, by author  ·  shelf 1 of {n}"
+    assert info["first_author"] == "Saenal"
+    assert info["footer"] == (
+        f"{info['count']} of 311 on this shelf  ·  Saenal to {info['last_author']}  ·  next shelf in 2 min"
+    )
+    assert 20 <= info["count"] <= 200
+    # section numbers wrap
+    _, info = render_section(_section_view(library, section=n + 1), DARK)
+    assert info["section"] == 1 and info["subtitle"].endswith(f"shelf 2 of {n}")
+
+
+def test_boards_and_labels_under_runs(library):
+    view = _section_view(library)
+    img, _ = render_section(view, DARK)
+    for y in BOARD_Y:
+        top = y + USABLE_H
+        assert _count(img.crop((0, top + 3, W, top + 14)), BOARD_COLOUR, tol=0) > W * 4
+    # every run placed on the first board has label ink on the board under its own slot
+    _, runs, hours, _ = library
+    board = plan_sections(runs, hours)[0][0]
+    x = 0
+    for i, (run, pieces) in enumerate(board):
+        if i:
+            x += 14
+        slot = max(40, sum(p.width for p in pieces) + 2 * (len(pieces) - 1))
+        band = img.crop((x, BOARD_Y[0] + USABLE_H + 2, x + slot, BOARD_Y[0] + USABLE_H + 14))
+        assert _count(band, LABEL_COLOUR, tol=40) > 3, run.key
+        x += slot
+    # nothing of a label spills into the 14 px gap before the next run
+    gap = img.crop((x + 2, BOARD_Y[0] + USABLE_H + 2, min(W, x + 12), BOARD_Y[0] + USABLE_H + 14))
+    assert _count(gap, LABEL_COLOUR, tol=40) == 0
+
+
+def test_face_outs_on_the_first_board_show_covers(library):
+    books, runs, hours, progress = library
+    covers = {b.item_id: Image.new("RGB", (120, 120), (20, 200, 220)) for b in books if b.status != STATUS_UNREAD}
+    img, _ = render_section(_section_view(library, covers=covers), DARK)
+    first = img.crop((0, BOARD_Y[0], W, BOARD_Y[0] + USABLE_H))
+    assert _count(first, (20, 200, 220), tol=6) > 138 * 138 * 3
+    assert _count(first, DARK.accent, tol=4) > 12 * 50  # Overgeared's ribbon
+
+
+def test_empty_library_renders_shelf_1_of_1():
+    library = ([], [], {}, {})
+    img, info = render_section(_section_view(library), DARK)
+    assert img.size == (W, 1080)
+    assert (info["sections"], info["section"], info["count"]) == (1, 0, 0)
+    assert info["subtitle"].endswith("shelf 1 of 1")
+    assert info["footer"] == "0 of 0 on this shelf"
+
+
+def test_single_face_out_book_is_one_section():
+    book = _book("only", "Only", "Solo Writer", status=STATUS_READ)
+    runs = _runs_of([book], {"only": {"isFinished": True, "finishedAt": 1}})
+    library = ([book], runs, {"only": 5.0}, {})
+    img, info = render_section(_section_view(library, section=3), PAPER)
+    assert (info["sections"], info["section"], info["count"]) == (1, 0, 1)
+    # one section: no "next shelf" promise
+    assert info["footer"] == "1 of 1 on this shelf  ·  Writer to Writer"
+
+
+def test_other_size_scales(library):
+    img, _ = render_section(_section_view(library), DARK, size=(820, 720), scale=2 / 3)
+    assert img.size == (820, 720)
+
+
+def test_one_section_renders_fast_with_cached_colours(library):
+    view = _section_view(library)
+    render_spines.clear_caches()
+    start = time.perf_counter()
+    render_section(view, DARK)
+    assert time.perf_counter() - start < 0.3
+
+
+def _ink_rows(img):
+    ink = img.convert("L").point(lambda v: 255 if v > 180 else 0)
+    return ink.getbbox()
+
+
+def test_author_surname_is_whole_or_absent():
+    short = Piece(_book("s", "Dune", "Frank Herbert"), "spine", 40, 200)
+    top = draw_spine(short, (40, 60, 120), DARK).crop((0, 5, 40, 60))
+    assert _ink_rows(top) is not None  # "Herbert" at the top
+    crowded = Piece(_book("c", "A title long enough to fill the room", "Frank Herbert"), "spine", 40, 200)
+    assert spine_title(crowded).endswith(ELLIPSIS)
+    top = draw_spine(crowded, (40, 60, 120), DARK).crop((0, 5, 40, 48))
+    assert _ink_rows(top) is None  # no clipped surname
+    narrow = Piece(_book("n", "Dune", "Frank Herbert"), "spine", 33, 200)
+    assert _ink_rows(draw_spine(narrow, (40, 60, 120), DARK).crop((0, 5, 33, 60))) is None

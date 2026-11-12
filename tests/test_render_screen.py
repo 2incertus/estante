@@ -13,29 +13,31 @@ def _mean(img):
     return sum(ImageStat.Stat(img).mean) / 3
 
 
-def test_composition_size_divider_and_halves(now_view, wall_view):
+def test_composition_size_divider_and_halves(now_view, shelf_view):
     for theme in (DARK, PAPER):
-        img = render_screen(ScreenView(now_view, wall_view, theme))
+        img = render_screen(ScreenView(now_view, shelf_view, theme))
         assert img.size == (1920, 1080) and img.mode == "RGB"
         assert img.getpixel((630, 540)) == theme.muted  # divider
         assert img.getpixel((630, 20)) == theme.bg and img.getpixel((630, 1060)) == theme.bg
         assert img.getpixel((629, 540)) == theme.bg and img.getpixel((631, 540)) == theme.bg
         assert img.getpixel((1919, 5)) == theme.bg and img.getpixel((5, 5)) == theme.bg
-    # the cover sits in the column, the wall tiles start at x 650 + 7
-    img = render_screen(ScreenView(now_view, wall_view, DARK))
+    # the cover sits in the column; the shelf starts at x 650: Overgeared faces out first on the
+    # top board (cover 138 px, bottom 8 px above the board at y 110 + 206), the board under it
+    img = render_screen(ScreenView(now_view, shelf_view, DARK))
     assert img.getpixel((300, 350)) != DARK.bg
-    assert img.getpixel((650 + 7 + 20, 110 + 20)) != DARK.bg
+    assert img.getpixel((650 + 6 + 69, 110 + 206 - 8 - 69)) != DARK.bg
+    assert img.getpixel((650 + 600, 110 + 206 + 8)) != DARK.bg
 
 
-def test_dim_halves_the_mean(now_view, wall_view):
-    view = ScreenView(now_view, wall_view, PAPER)
+def test_dim_halves_the_mean(now_view, shelf_view):
+    view = ScreenView(now_view, shelf_view, PAPER)
     full = _mean(render_screen(view))
     half = _mean(render_screen(dataclasses.replace(view, dim=0.5)))
     assert abs(half / full - 0.5) < 0.02
 
 
-def test_dim_is_clamped(now_view, wall_view):
-    view = ScreenView(now_view, wall_view, PAPER)
+def test_dim_is_clamped(now_view, shelf_view):
+    view = ScreenView(now_view, shelf_view, PAPER)
     full = _mean(render_screen(view))
     floor = _mean(render_screen(dataclasses.replace(view, dim=0.0)))
     assert abs(floor / full - 0.1) < 0.02
@@ -43,8 +45,8 @@ def test_dim_is_clamped(now_view, wall_view):
     assert over.tobytes() == render_screen(view).tobytes()
 
 
-def test_other_16_9_size(now_view, wall_view):
-    img = render_screen(ScreenView(now_view, wall_view, DARK), size=(1280, 720))
+def test_other_16_9_size(now_view, shelf_view):
+    img = render_screen(ScreenView(now_view, shelf_view, DARK), size=(1280, 720))
     assert img.size == (1280, 720)
     assert img.getpixel((420, 360)) == DARK.muted  # 630 * 2 / 3
 
@@ -85,8 +87,8 @@ def test_to_fb_bytes_rejects_other_depths():
         to_fb_bytes(_sample(), FbInfo(7, 3, 24, 21))
 
 
-def test_to_fb_bytes_565_is_fast_at_1080p(now_view, wall_view):
-    img = render_screen(ScreenView(now_view, wall_view, DARK))
+def test_to_fb_bytes_565_is_fast_at_1080p(now_view, shelf_view):
+    img = render_screen(ScreenView(now_view, shelf_view, DARK))
     start = time.perf_counter()
     out = to_fb_bytes(img, FbInfo(1920, 1080, 16, 3840))
     assert time.perf_counter() - start < 0.2
@@ -120,8 +122,8 @@ def test_to_fb_bytes_565_bit_layout():
     assert to_fb_bytes(img, FbInfo(3, 1, 16, 6)) == b"\x00\xf8\xe0\x07\x1f\x00"
 
 
-def test_screen_is_a_plain_rgb_image_the_caller_can_rotate(now_view, wall_view):
-    img = render_screen(ScreenView(now_view, wall_view, DARK))
+def test_screen_is_a_plain_rgb_image_the_caller_can_rotate(now_view, shelf_view):
+    img = render_screen(ScreenView(now_view, shelf_view, DARK))
     turned = img.rotate(180)
     assert turned.mode == "RGB" and turned.size == (1920, 1080)
     assert turned.getpixel((1919 - 630, 1079 - 540)) == DARK.muted  # the divider, upside down

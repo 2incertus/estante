@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """estante-ctl: the conductor that draws Estante on the HDMI framebuffer.
 
-One always-on composition: Now listening on the left, the cover wall of one
-library on the right. Polls Audiobookshelf, answers Ouvido's /swap, /show and
+One always-on composition: Now listening on the left, one library as a shelf
+of spines on the right. Polls Audiobookshelf, answers Ouvido's /swap, /show and
 /badge and Home Assistant's /screen, and writes finished frames to /dev/fb0.
 Stdlib only here; Pillow lives behind estante_lib's render modules.
 """
@@ -24,11 +24,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from estante_lib.abs import AbsClient, AbsError, CoverCache  # noqa: E402
 from estante_lib.display_fb import FbInfo, FileFramebuffer, Framebuffer  # noqa: E402
 from estante_lib.model import (  # noqa: E402
-    build_shelf,
     finished_in_year,
     pick_now_listening,
     progress_index,
     shelf_counts,
+    shelf_parts,
 )
 from estante_lib.render_now import NowListeningView  # noqa: E402
 from estante_lib.render_screen import (  # noqa: E402
@@ -38,7 +38,7 @@ from estante_lib.render_screen import (  # noqa: E402
     render_screen,
     to_fb_bytes,
 )
-from estante_lib.render_wall import WallView  # noqa: E402
+from estante_lib.render_spines import ColourCache, ShelfSectionView, is_face  # noqa: E402
 from estante_lib.state import normalize_badge, read_state, update_state  # noqa: E402
 from estante_lib.theme import get_theme  # noqa: E402
 
@@ -183,6 +183,7 @@ class Conductor(threading.Thread):
         self.theme = get_theme(cfg["theme"])
         self.canvas = tuple(int(v) for v in cfg["canvas"])
         self.covers = CoverCache(os.path.join(cfg["state_dir"], "covers"), client) if client else None
+        self.colours = ColourCache(os.path.join(cfg["state_dir"], "spines.json"))
         self.render_count = 0
         self._lock = threading.Lock()
         # held around every write to the framebuffer and every blank, so a
@@ -206,6 +207,9 @@ class Conductor(threading.Thread):
         self._nl = None
         self._me = None
         self._books = None
+        self._runs = None
+        self._hours = None
+        self._pct = None
         self._items = None
         self._items_wall = None
         self._items_at = None
@@ -213,8 +217,9 @@ class Conductor(threading.Thread):
         self._abs_problem = None
         self._render_problem = None
         self._covers_stalled = False
-        # covers of the current wall only, so a swap frees the other wall's images
-        self._wall_covers = {}
+        # the current wall's art only, so a swap frees the other wall's images:
+        # item id -> (updated_at, spine colour or None, cover image of a face-out book or None)
+        self._wall_art = {}
         self._covers_wall = None
         self._cover_misses = set()
         self._now_cover = None
@@ -389,7 +394,7 @@ class Conductor(threading.Thread):
             or now - self._items_at >= refresh
         )
         items = self.client.library_items(wall.library_id) if items_due else self._items
-        books = build_shelf(items, progress_index(me))
+        books, runs, hours, pct = shelf_parts(items, progress_index(me))
         # every read succeeded: only now does the screen move to the wall asked for
         if items_due:
             self._items = items
@@ -404,6 +409,9 @@ class Conductor(threading.Thread):
             self._wall = index
         self._me = me
         self._books = books
+        self._runs = runs
+        self._hours = hours
+        self._pct = pct
         shown = (
             index,
             (nl.item_id, nl.last_update, nl.finished) if nl else None,
@@ -445,15 +453,25 @@ class Conductor(threading.Thread):
             log.info("rendering works again")
             self._render_problem = None
 
-    def _load_wall_covers(self, index, books):
+    def _art_ready(self, book):
+        entry = self._wall_art.get(book.item_id)
+        if entry is None or entry[0] != book.updated_at:
+            return False
+        return entry[2] is not None or not is_face(book)
+
+    def _load_wall_art(self, index, books):
+        """(face-out covers, spine colours) of the shown wall.
+
+        Every book's cover file is fetched once (cached on disk) for its spine colour, which the
+        ColourCache keeps in spines.json; only face-out books hold their image in memory.
+        """
         if self._covers_wall != index:
-            self._wall_covers = {}
+            self._wall_art = {}
             self._covers_wall = index
         width = self.cfg["cover_width"]
         todo = [
             b for b in books
-            if (self._wall_covers.get(b.item_id) or (None,))[0] != b.updated_at
-            and (b.item_id, b.updated_at) not in self._cover_misses
+            if not self._art_ready(b) and (b.item_id, b.updated_at) not in self._cover_misses
         ]
         if self._covers_stalled:
             todo = []
@@ -463,10 +481,11 @@ class Conductor(threading.Thread):
                 break
             started = time.monotonic()
             path = self.covers.path(book.item_id, book.updated_at, width)
-            img = load_image(path, square=width) if path else None
-            if img is None:
+            colour = self.colours.get(book.item_id, book.updated_at, path) if path else None
+            img = load_image(path, square=width) if path and is_face(book) else None
+            if colour is None:
                 self._cover_misses.add((book.item_id, book.updated_at))
-                self._wall_covers.pop(book.item_id, None)
+                self._wall_art.pop(book.item_id, None)
                 slow_misses = slow_misses + 1 if time.monotonic() - started > COVER_SLOW_S else 0
                 if slow_misses >= COVER_SLOW_LIMIT:
                     log.warning(
@@ -477,10 +496,16 @@ class Conductor(threading.Thread):
                     break
             else:
                 slow_misses = 0
-                self._wall_covers[book.item_id] = (book.updated_at, img)
+                self._wall_art[book.item_id] = (book.updated_at, colour, img)
             if n % COVER_LOG_EVERY == 0:
                 log.info("covers: %d of %d loaded", n, len(todo))
-        return {item_id: img for item_id, (_, img) in self._wall_covers.items()}
+        try:
+            self.colours.save()
+        except OSError as e:
+            log.warning("cannot record the spine colours: %s", e)
+        covers = {i: img for i, (_, _, img) in self._wall_art.items() if img is not None}
+        colours = {i: rgb for i, (_, rgb, _) in self._wall_art.items() if rgb is not None}
+        return covers, colours
 
     def _load_now_cover(self, nl):
         if nl is None:
@@ -504,7 +529,7 @@ class Conductor(threading.Thread):
         with self._lock:
             nl = self._nl
         now_cover = self._load_now_cover(nl)
-        wall_covers = self._load_wall_covers(index, self._books)
+        covers, colours = self._load_wall_art(index, self._books)
         if not self._screen_on():
             return
         with self._lock:
@@ -518,10 +543,11 @@ class Conductor(threading.Thread):
             local.year,
             badge,
         )
-        wall_view = WallView(
-            wall.title, wall.subtitle, self._books, wall_covers, shelf_counts(self._books),
+        shelf_view = ShelfSectionView(
+            wall.title, wall.subtitle, self._books, self._runs, self._hours, self._pct, covers, colours,
+            shelf_counts(self._books), 0, self.cfg.get("shelf_minutes", 2), badge,
         )
-        img = render_screen(ScreenView(now_view, wall_view, self.theme, dim), self.canvas)
+        img = render_screen(ScreenView(now_view, shelf_view, self.theme, dim), self.canvas)
         if self._blit(img):
             with self._lock:
                 self._last_render = now_iso()

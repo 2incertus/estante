@@ -95,32 +95,28 @@ AUDIOBOOKS_ID = "b14de8f5-99a5-4cba-b970-6a2cb65f2993"
 LIGHT_NOVELS_ID = "65bcd45d-1cce-496c-950e-4f3aabf5f5eb"
 
 
-def _wall_view(client, cache_dir, library_id, title, subtitle, n_covers):
-    from estante_lib.model import build_shelf, progress_index, shelf_counts
-    from estante_lib.render_wall import WallView
+def _shelf_view(client, state_dir, library_id, title, subtitle):
+    from estante_lib.abs import CoverCache
+    from estante_lib.model import progress_index, shelf_counts, shelf_parts
+    from estante_lib.render_spines import ColourCache, ShelfSectionView, shelf_art
 
-    books = build_shelf(client.library_items(library_id), progress_index(client.me()))
-    covers = {}
-    for book in books[:n_covers]:
-        img = _cover_image(client, cache_dir, book.item_id, book.updated_at, 80)
-        if img is not None:
-            covers[book.item_id] = img
-    return WallView(title, subtitle, books, covers, shelf_counts(books))
-
-
-@pytest.fixture
-def wall_view(client, tmp_path):
-    """Audiobooks fixture (311 books), covers for the first 12 (all recorded)."""
-    view = _wall_view(client, tmp_path / "covers", AUDIOBOOKS_ID, "Audiobooks", "Audiobooks, by author", 12)
-    assert len(view.books) == 311 and len(view.covers) == 12
-    return view
-
-
-@pytest.fixture
-def novels_wall_view(client, tmp_path):
-    """Light novels fixture (597 books), covers for the first 6 (all recorded)."""
-    view = _wall_view(
-        client, tmp_path / "covers", LIGHT_NOVELS_ID, "Light novels", "Light Novels, by author", 6
+    books, runs, hours, pct = shelf_parts(client.library_items(library_id), progress_index(client.me()))
+    cache = CoverCache(str(state_dir / "covers"), client)
+    covers, colours = shelf_art(
+        books, lambda b: cache.path(b.item_id, b.updated_at, 80), ColourCache(str(state_dir / "spines.json"))
     )
-    assert len(view.books) == 597 and len(view.covers) == 6
+    return ShelfSectionView(
+        title, subtitle, books, runs, hours, pct, covers, colours, shelf_counts(books), 0, 2, {}
+    )
+
+
+@pytest.fixture
+def shelf_view(client, tmp_path):
+    """Audiobooks fixture (311 books): 12 recorded covers, 4 of them face-out books.
+
+    ls tests/fixtures/covers | grep -v w400 lists 18 covers, 12 of them in audiobooks.json;
+    4 of those have a finished or in-progress record in me.json.
+    """
+    view = _shelf_view(client, tmp_path, AUDIOBOOKS_ID, "The shelf", "Audiobooks, by author")
+    assert len(view.books) == 311 and len(view.colours) == 12 and len(view.covers) == 4
     return view
