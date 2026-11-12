@@ -134,7 +134,7 @@ For anyone:
 
 ## Home Assistant
 
-The policy lives in Home Assistant; the Pi only obeys. A `rest_command.estante_screen` posts `{"on", "dim"}` to `http://192.168.68.76:8360/screen`, and automations on the office presence boolean `input_boolean.office_occupied` drive it: office occupied between 07:00 and 23:30 turns the screen on (dimmed to 0.6 after 19:00), the office empty (the boolean is already debounced by 15 minutes) turns it off, 23:30 turns it off whatever the presence, 07:00 turns it on when the office is already occupied, and 19:00 dims it when occupied. Times are Home Assistant's local time.
+The policy lives in Home Assistant; the Pi only obeys. A `rest_command.estante_screen` posts `{"on", "dim"}` to `http://192.168.68.76:8360/screen`, and automations on the office presence boolean `input_boolean.office_occupied` drive it: office occupied between 07:00 and 23:30 turns the screen on at full brightness, the office empty (the boolean is already debounced by 15 minutes) turns it off, 23:30 turns it off whatever the presence, and 07:00 turns it on when the office is already occupied. There is no evening dim (Mathias's call, 2026-11-12); `dim` stays available for a voice phrase or a future rule. Times are Home Assistant's local time.
 
 Nothing of this is configured in Home Assistant yet. The rest_command and the automations above are the plan; their reference YAML is applied in Home Assistant in its own step, after the Pi answers on 8360. Until then the screen stays on at full brightness.
 
