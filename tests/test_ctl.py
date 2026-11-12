@@ -1,5 +1,6 @@
 import json
 import logging
+import socket
 import sys
 import threading
 import time
@@ -13,23 +14,70 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "ctl"))
 
 import estante_ctl  # noqa: E402
-from estante_lib.abs import AbsClient  # noqa: E402
+from estante_lib.abs import AbsClient, AbsError  # noqa: E402
+from estante_lib.display_fb import FbInfo, FileFramebuffer  # noqa: E402
+from estante_lib.render_screen import render_mark, to_fb_bytes  # noqa: E402
 from estante_lib.state import read_state, write_state  # noqa: E402
-from fake_inkypi import AUDIOBOOKS_ID, LIGHT_NOVELS_ID, FakeInkyPi  # noqa: E402
+from estante_lib.theme import DARK  # noqa: E402
 
 IN_PROGRESS_ID = "4aa1594d-b6ce-441f-9ab3-951ff1340009"
 PROGRESS_PATH = f"/api/me/progress/{IN_PROGRESS_ID}"
+AUDIOBOOKS_ID = "b14de8f5-99a5-4cba-b970-6a2cb65f2993"
+LIGHT_NOVELS_ID = "65bcd45d-1cce-496c-950e-4f3aabf5f5eb"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
-SNAPSHOT_KEYS = {"screen", "screens", "badge", "busy", "last_display", "next_rotation", "rotate_minutes"}
+SNAPSHOT_KEYS = {"wall", "walls", "badge", "screen", "busy", "last_render", "now_listening"}
+TWO_WALLS = [
+    {"name": "audiobooks", "library_id": ""},
+    {"name": "light_novels", "library_id": ""},
+]
+SIZE = (1920, 1080)
+INFO = FbInfo(1920, 1080, 16, 3840)
+# The wall header (title, counts, subtitle) on the 1920x1080 canvas.
+HEADER = (650, 10, 1880, 90)
 
 
-def wait_until(predicate, timeout):
+def wait_until(predicate, timeout=15):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
             return True
         time.sleep(0.02)
     raise AssertionError(f"condition not met within {timeout} s")
+
+
+def fixture_json(name):
+    return json.loads((FIXTURES / name).read_text())
+
+
+def closed_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def rgb565(rgb):
+    r, g, b = rgb
+    return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+
+
+def pixel(frame, x, y, width=1920):
+    i = (y * width + x) * 2
+    return frame[i] | (frame[i + 1] << 8)
+
+
+def region(frame, box, width=1920):
+    x0, y0, x1, y1 = box
+    return b"".join(frame[(y * width + x0) * 2:(y * width + x1) * 2] for y in range(y0, y1))
+
+
+def brightness(frame, box, width=1920):
+    """Sum of the 5-6-5 channels over a box, sampled every 4th pixel."""
+    total = 0
+    data = region(frame, box, width)
+    for i in range(0, len(data), 8):
+        v = data[i] | (data[i + 1] << 8)
+        total += (v >> 11) + ((v >> 5) & 0x3F) + (v & 0x1F)
+    return total
 
 
 class Reply:
@@ -53,7 +101,8 @@ class Http:
             with urllib.request.urlopen(req, timeout=5) as resp:
                 return Reply(resp.status, json.loads(resp.read()), resp.headers.get("Content-Type"))
         except urllib.error.HTTPError as e:
-            return Reply(e.code, json.loads(e.read()), e.headers.get("Content-Type"))
+            with e:
+                return Reply(e.code, json.loads(e.read()), e.headers.get("Content-Type"))
 
     def post(self, path, body=None, raw=None):
         return self.request("POST", path, body, raw)
@@ -62,41 +111,46 @@ class Http:
         return self.request("GET", path)
 
 
-@pytest.fixture
-def fake_inkypi():
-    with FakeInkyPi() as fake:
-        yield fake
+class NoBlankFramebuffer(FileFramebuffer):
+    """A driver that refuses DPMS, so the conductor has to paint black."""
+
+    def blank(self, on):
+        self.blank_calls.append(bool(on))
+        return False
+
+
+@pytest.fixture(autouse=True)
+def fast_tick(monkeypatch):
+    monkeypatch.setattr(estante_ctl, "TICK_S", 0.02)
 
 
 @pytest.fixture
-def tmp_state(tmp_path):
-    return tmp_path / "state" / "state.json"
-
-
-@pytest.fixture
-def make_conductor(fake_inkypi, fake_abs, tmp_state):
+def make_conductor(fake_abs, tmp_path):
     started = []
 
-    def make(with_abs=True, start=True, **overrides):
+    def make(start=True, abs_url=None, fb_cls=None, fb_name="fb", **overrides):
         cfg = dict(estante_ctl.DEFAULTS)
         cfg.update(
-            inkypi_url=fake_inkypi.url,
-            inkypi_device_json=fake_inkypi.device_json,
-            rotate_minutes=0.02,
-            poll_minutes=0.01,
-            min_redraw_minutes=0,
-            state_dir=str(tmp_state.parent),
+            abs_url=fake_abs.base_url if abs_url is None else abs_url,
+            abs_token="TESTTOKEN",
+            state_dir=str(tmp_path / "state"),
+            fb_file=str(tmp_path / fb_name),
+            fb_size=[1920, 1080],
+            fb_bpp=16,
+            poll_seconds=0.2,
+            # the fake records Overgeared's cover only at width 400
+            now_cover_width=400,
             listen="127.0.0.1",
             port=0,
+            walls=TWO_WALLS,
         )
         cfg.update(overrides)
-
-        def factory():
-            return AbsClient(fake_abs.base_url, "TESTTOKEN", timeout=5) if with_abs else None
-
-        conductor = estante_ctl.Conductor(
-            cfg, estante_ctl.InkyPi(cfg["inkypi_url"]), factory, str(tmp_state)
-        )
+        if fb_cls is None:
+            fb = estante_ctl.open_framebuffer(cfg)
+        else:
+            w, h = cfg["fb_size"]
+            fb = fb_cls(cfg["fb_file"], FbInfo(w, h, 16, w * 2))
+        conductor = estante_ctl.Conductor(cfg, estante_ctl.make_client(cfg), fb, estante_ctl.state_file(cfg))
         if start:
             conductor.start()
         started.append(conductor)
@@ -106,503 +160,533 @@ def make_conductor(fake_inkypi, fake_abs, tmp_state):
     for c in started:
         c.stop()
         if c.ident is not None:
-            c.join(timeout=5)
+            c.join(timeout=10)
         assert not c.is_alive()
-
-
-@pytest.fixture
-def running_conductor(make_conductor):
-    return make_conductor()
+        c.fb.close()
 
 
 @pytest.fixture
 def conductor(make_conductor):
-    """A conductor whose rotation never fires during a test."""
-    return make_conductor(rotate_minutes=10, poll_minutes=10)
+    return make_conductor()
 
 
 @pytest.fixture
-def http(conductor, fake_inkypi):
+def http(conductor):
     server = estante_ctl.serve(conductor.cfg, conductor)
-    wait_until(lambda: fake_inkypi.displays, 5)
-    wait_until(lambda: not conductor.snapshot()["busy"], 5)
     yield Http(server)
     server.shutdown()
     server.server_close()
 
 
-def names(fake):
-    return [d[2] for d in fake.displays]
+def frame(conductor):
+    with open(conductor.cfg["fb_file"], "rb") as f:
+        return f.read()
 
 
-def test_startup_shows_first_screen(fake_inkypi, running_conductor):
-    wait_until(lambda: fake_inkypi.displays, 5)
-    assert fake_inkypi.displays[0] == ("Default", "now_listening", "Now listening")
+def rendered(conductor):
+    wait_until(lambda: conductor.snapshot()["last_render"] is not None)
+    wait_until(lambda: not conductor.snapshot()["busy"])
+    return frame(conductor)
 
 
-def test_rotation_cycles_in_playlist_order(fake_inkypi, running_conductor):
-    wait_until(lambda: len(fake_inkypi.displays) >= 4, 10)
-    assert names(fake_inkypi)[:4] == ["Now listening", "The shelf", "Light novels", "Now listening"]
-    assert [d[1] for d in fake_inkypi.displays[:3]] == ["now_listening", "the_shelf", "the_shelf"]
+def renders_after(conductor, before):
+    wait_until(lambda: conductor.render_count > before)
+    wait_until(lambda: not conductor.snapshot()["busy"])
+    return frame(conductor)
 
 
-def test_swap_shows_next_now(http, fake_inkypi, conductor):
-    before = conductor.snapshot()["next_rotation"]
-    assert before is not None
-    time.sleep(1.1)
-    reply = http.post("/swap")
-    assert reply.status == 202
-    assert reply.body == {"queued": "swap", "screen": None}
-    assert reply.content_type == "application/json"
-    wait_until(lambda: len(fake_inkypi.displays) >= 2, 2)
-    assert fake_inkypi.displays[1] == ("Default", "the_shelf", "The shelf")
-    wait_until(lambda: not conductor.snapshot()["busy"], 2)
-    snap = conductor.snapshot()
-    assert snap["screen"] == "The shelf"
-    assert snap["next_rotation"] > before
+def render_count(conductor):
+    return conductor.render_count
 
 
-def test_show_by_slug_and_name(http, fake_inkypi, conductor):
-    reply = http.post("/show", {"screen": "light_novels"})
-    assert reply.status == 202
-    assert reply.body == {"queued": "show", "screen": "Light novels"}
-    wait_until(lambda: len(fake_inkypi.displays) >= 2, 3)
-    assert fake_inkypi.displays[1] == ("Default", "the_shelf", "Light novels")
-    wait_until(lambda: not conductor.snapshot()["busy"], 2)
-
-    reply = http.post("/show", {"screen": "The shelf"})
-    assert reply.status == 202
-    assert reply.body["screen"] == "The shelf"
-    wait_until(lambda: len(fake_inkypi.displays) >= 3, 3)
-    assert fake_inkypi.displays[2][2] == "The shelf"
-
-    assert http.post("/show", {"screen": "the shelf"}).body["screen"] == "The shelf"
-    assert http.post("/show", {"screen": "the_shelf"}).body["screen"] == "The shelf"
-
-    reply = http.post("/show", {"screen": "nope"})
-    assert reply.status == 404
-    assert reply.body == {
-        "error": "unknown screen",
-        "screens": ["Now listening", "The shelf", "Light novels"],
-    }
-    assert http.post("/show", raw=b"{not json").status == 400
-    assert http.post("/show", {}).status == 400
-    assert http.post("/show", {"screen": 3}).status == 400
+def mark_bytes():
+    return to_fb_bytes(render_mark(DARK, SIZE), INFO)
 
 
-def test_badge_change_redraws_current_and_persists(http, fake_inkypi, conductor, tmp_state):
-    payload = {"message_waiting": True, "dnd": False, "from": "Jasmine"}
-    reply = http.post("/badge", payload)
-    assert reply.status == 202
-    assert reply.body == {
-        "badge": {"message_waiting": True, "dnd": False, "count": 0, "from": "Jasmine"},
-        "redraw": True,
-    }
-    wait_until(lambda: len(fake_inkypi.displays) >= 2, 3)
-    assert names(fake_inkypi)[:2] == ["Now listening", "Now listening"]
-    assert read_state(str(tmp_state))["badge"]["message_waiting"] is True
-    assert read_state(str(tmp_state))["badge"]["from"] == "Jasmine"
-    wait_until(lambda: not conductor.snapshot()["busy"], 2)
-
-    reply = http.post("/badge", payload)
-    assert reply.status == 202
-    assert reply.body["redraw"] is False
-    time.sleep(0.8)
-    assert len(fake_inkypi.displays) == 2
-
-    assert http.post("/badge", raw=b"[oops").status == 400
-    assert http.post("/badge", [1, 2]).status == 400
+def bump_progress(fake_abs, seconds=600):
+    prog = fixture_json(f"progress_{IN_PROGRESS_ID}.json")
+    prog["currentTime"] = (prog.get("currentTime") or 0) + seconds
+    prog["lastUpdate"] = (prog.get("lastUpdate") or 0) + 1000
+    fake_abs.override(PROGRESS_PATH, prog)
 
 
-def test_shelf_page_advances_on_each_show(fake_inkypi, tmp_state, make_conductor):
-    write_state({"page_counts": {AUDIOBOOKS_ID: 7}}, str(tmp_state))
-    conductor = make_conductor(rotate_minutes=10, poll_minutes=10)
-    server = estante_ctl.serve(conductor.cfg, conductor)
-    http = Http(server)
+# config
+
+
+def test_defaults_and_example_config():
+    d = estante_ctl.DEFAULTS
+    assert d["listen"] == "0.0.0.0"
+    assert d["port"] == 8360
+    assert d["walls"] == [{"name": "audiobooks", "library_id": "", "title": "The shelf"}]
+    assert d["poll_seconds"] == 60 and d["wall_refresh_minutes"] == 15
+    assert d["cover_width"] == 120 and d["now_cover_width"] == 520
+    assert d["canvas"] == [1920, 1080] and d["rotate"] == 0
+    assert d["fb_device"] == "/dev/fb0" and d["fb_sysfs"] == "/sys/class/graphics/fb0"
+    assert d["fb_file"] == "" and d["fb_size"] == [1920, 1080] and d["fb_bpp"] == 16
+    assert d["theme"] == "dark" and d["state_dir"] == "/var/lib/estante"
+    example = json.loads((REPO / "ctl" / "estante.example.json").read_text())
+    assert example == d
+
+
+def test_load_config_merges_and_validates(tmp_path, monkeypatch):
+    path = tmp_path / "estante.json"
+    path.write_text(json.dumps({"port": 9999, "rotate": 180, "theme": "paper"}))
+    cfg = estante_ctl.load_config(str(path))
+    assert cfg["port"] == 9999 and cfg["rotate"] == 180 and cfg["theme"] == "paper"
+    assert cfg["walls"] == estante_ctl.DEFAULTS["walls"]
+    monkeypatch.setenv("ESTANTE_CONFIG", str(path))
+    assert estante_ctl.load_config(None)["port"] == 9999
+    path.write_text(json.dumps({"rotate": 90}))
+    with pytest.raises(ValueError, match="rotate"):
+        estante_ctl.load_config(str(path))
+    path.write_text(json.dumps({"theme": "neon"}))
+    with pytest.raises(KeyError, match="neon"):
+        estante_ctl.load_config(str(path))
+    path.write_text("[1, 2]")
+    with pytest.raises(ValueError, match="JSON object"):
+        estante_ctl.load_config(str(path))
+    assert estante_ctl.load_config(str(tmp_path / "missing.json")) == estante_ctl.DEFAULTS
+
+
+def test_defaults_are_not_shared_between_configs(tmp_path):
+    cfg = estante_ctl.load_config(None)
+    cfg["walls"][0]["library_id"] = "changed"
+    assert estante_ctl.DEFAULTS["walls"][0]["library_id"] == ""
+
+
+def test_unit_file():
+    unit = (REPO / "ctl" / "estante-ctl.service").read_text()
+    for line in (
+        "User=root",
+        "After=network-online.target",
+        "Wants=network-online.target",
+        "ExecStart=/opt/estante/.venv/bin/python /opt/estante/ctl/estante_ctl.py",
+        "Environment=ESTANTE_CONFIG=/etc/estante/estante.json",
+        "Restart=always",
+        "RestartSec=5",
+        "WantedBy=multi-user.target",
+    ):
+        assert line in unit.splitlines()
+    assert "inkypi" not in unit.lower()
+
+
+def test_open_framebuffer_file(tmp_path):
+    cfg = dict(estante_ctl.DEFAULTS, fb_file=str(tmp_path / "fb"), fb_size=[1024, 768], fb_bpp=16)
+    fb = estante_ctl.open_framebuffer(cfg)
     try:
-        wait_until(lambda: fake_inkypi.displays, 5)
-        seen = []
-        for i in range(3):
-            wait_until(lambda: not conductor.snapshot()["busy"], 3)
-            count = len(fake_inkypi.displays)
-            assert http.post("/show", {"screen": "the_shelf"}).status == 202
-            wait_until(lambda: len(fake_inkypi.displays) > count, 3)
-            seen.append(read_state(str(tmp_state))["pages"][AUDIOBOOKS_ID])
-            if i == 0:
-                wait_until(lambda: not conductor.snapshot()["busy"], 3)
-                count = len(fake_inkypi.displays)
-                reply = http.post("/badge", {"message_waiting": True})
-                assert reply.body["redraw"] is True
-                wait_until(lambda: len(fake_inkypi.displays) > count, 3)
-                assert fake_inkypi.displays[-1][2] == "The shelf"
-                assert read_state(str(tmp_state))["pages"][AUDIOBOOKS_ID] == 0
-        assert seen == [0, 1, 2]
-        assert LIGHT_NOVELS_ID not in read_state(str(tmp_state))["pages"]
+        assert isinstance(fb, FileFramebuffer)
+        assert (fb.info.width, fb.info.height, fb.info.bpp, fb.info.stride) == (1024, 768, 16, 2048)
+        assert (tmp_path / "fb").stat().st_size == 2048 * 768
+    finally:
+        fb.close()
+
+
+# walls
+
+
+def test_resolve_walls_default_is_the_audiobooks_shelf(client):
+    (wall,) = estante_ctl.resolve_walls(estante_ctl.load_config(None), client)
+    assert (wall.name, wall.library_id, wall.title, wall.subtitle) == (
+        "audiobooks", AUDIOBOOKS_ID, "The shelf", "Audiobooks, by author"
+    )
+
+
+def test_resolve_walls_by_library_name(client):
+    cfg = dict(estante_ctl.DEFAULTS, walls=TWO_WALLS)
+    walls = estante_ctl.resolve_walls(cfg, client)
+    assert [(w.name, w.library_id, w.title, w.subtitle) for w in walls] == [
+        ("audiobooks", AUDIOBOOKS_ID, "The shelf", "Audiobooks, by author"),
+        ("light_novels", LIGHT_NOVELS_ID, "Light novels", "Light Novels, by author"),
+    ]
+
+
+def test_resolve_walls_keeps_ids_and_titles(client):
+    cfg = dict(
+        estante_ctl.DEFAULTS,
+        walls=[{"name": "novels", "library_id": LIGHT_NOVELS_ID, "title": "Novels"}],
+    )
+    (wall,) = estante_ctl.resolve_walls(cfg, client)
+    assert (wall.name, wall.library_id, wall.title, wall.subtitle) == (
+        "novels", LIGHT_NOVELS_ID, "Novels", "Light Novels, by author"
+    )
+
+
+def test_resolve_walls_unknown_name_lists_libraries(client):
+    cfg = dict(estante_ctl.DEFAULTS, walls=[{"name": "comics", "library_id": ""}])
+    with pytest.raises(ValueError) as e:
+        estante_ctl.resolve_walls(cfg, client)
+    for name in ("comics", "Audiobooks", "Light Novels", "Podcasts"):
+        assert name in str(e.value)
+
+
+def test_resolve_walls_unknown_id_lists_libraries(client):
+    cfg = dict(estante_ctl.DEFAULTS, walls=[{"name": "audiobooks", "library_id": "nope"}])
+    with pytest.raises(ValueError, match="Light Novels"):
+        estante_ctl.resolve_walls(cfg, client)
+
+
+# frames
+
+
+def test_startup_frame_is_the_mark(make_conductor):
+    c = make_conductor(abs_url=f"http://127.0.0.1:{closed_port()}")
+    wait_until(lambda: frame(c) == mark_bytes())
+    assert pixel(frame(c), 0, 0) == rgb565(DARK.bg)
+    # "ESTANTE" in the mark colour sits around the centre
+    centre = region(frame(c), (860, 520, 1060, 560))
+    assert rgb565(DARK.mark).to_bytes(2, "little") in centre
+    assert c.snapshot()["last_render"] is None
+
+
+def test_poll_renders_the_composition(conductor):
+    data = rendered(conductor)
+    assert data != mark_bytes()
+    assert pixel(data, 0, 0) == rgb565(DARK.bg)
+    snap = conductor.snapshot()
+    assert snap["wall"] == "audiobooks"
+    assert snap["walls"] == ["audiobooks", "light_novels"]
+    assert snap["now_listening"]["item_id"] == IN_PROGRESS_ID
+    assert snap["now_listening"]["title"] == "Overgeared"
+    assert 0 <= snap["now_listening"]["pct"] <= 100
+    # the Now listening cover (column 50..570, y 90..610) is drawn
+    assert brightness(data, (50, 90, 570, 610)) > brightness(mark_bytes(), (50, 90, 570, 610)) * 2
+
+
+def test_unchanged_polls_do_not_rerender(conductor):
+    rendered(conductor)
+    count = render_count(conductor)
+    time.sleep(1.0)
+    assert render_count(conductor) == count
+
+
+def test_progress_change_rerenders(conductor, fake_abs):
+    before = rendered(conductor)
+    count = render_count(conductor)
+    bump_progress(fake_abs, seconds=3 * 3600)
+    after = renders_after(conductor, count)
+    assert after != before
+
+
+def test_wall_progress_change_rerenders(conductor, fake_abs):
+    before = rendered(conductor)
+    count = render_count(conductor)
+    me = fixture_json("me.json")
+    ids = {p.get("libraryItemId") for p in me["mediaProgress"]}
+    unread = next(b["id"] for b in fixture_json("audiobooks.json")["results"] if b["id"] not in ids)
+    me["mediaProgress"].append(
+        {"libraryItemId": unread, "isFinished": True, "progress": 1, "finishedAt": 1, "lastUpdate": 1}
+    )
+    fake_abs.override("/api/me", me)
+    after = renders_after(conductor, count)
+    assert region(after, HEADER) != region(before, HEADER)
+
+
+def test_wall_refresh_rerenders(make_conductor):
+    c = make_conductor(wall_refresh_minutes=0.01)
+    rendered(c)
+    count = render_count(c)
+    wait_until(lambda: render_count(c) > count)
+
+
+def test_rotate_180_turns_the_frame(make_conductor):
+    upright = rendered(make_conductor(fb_name="fb0"))
+    turned = rendered(make_conductor(fb_name="fb180", rotate=180))
+    pixels = [upright[i:i + 2] for i in range(0, len(upright), 2)]
+    assert turned == b"".join(reversed(pixels))
+
+
+def test_framebuffer_smaller_than_canvas(make_conductor):
+    c = make_conductor(fb_size=[1024, 768])
+    data = rendered(c)
+    assert len(data) == 1024 * 768 * 2
+    assert pixel(data, 0, 0, width=1024) == rgb565(DARK.bg)
+    assert data != to_fb_bytes(render_mark(DARK, SIZE), FbInfo(1024, 768, 16, 2048))
+
+
+# routes
+
+
+def test_swap_changes_the_wall_and_its_header(http, conductor):
+    before = rendered(conductor)
+    count = render_count(conductor)
+    r = http.post("/swap")
+    assert r.status == 202 and r.body == {"queued": "swap"}
+    after = renders_after(conductor, count)
+    assert conductor.snapshot()["wall"] == "light_novels"
+    assert region(after, HEADER) != region(before, HEADER)
+    assert read_state(estante_ctl.state_file(conductor.cfg))["wall"] == "light_novels"
+    count = render_count(conductor)
+    http.post("/swap")
+    back = renders_after(conductor, count)
+    assert conductor.snapshot()["wall"] == "audiobooks"
+    assert region(back, HEADER) == region(before, HEADER)
+
+
+def test_show_by_name_and_by_id(http, conductor):
+    rendered(conductor)
+    count = render_count(conductor)
+    r = http.post("/show", {"screen": "light_novels"})
+    assert r.status == 202 and r.body["queued"] == "show" and r.body["wall"] == "light_novels"
+    renders_after(conductor, count)
+    assert conductor.snapshot()["wall"] == "light_novels"
+    count = render_count(conductor)
+    r = http.post("/show", {"screen": AUDIOBOOKS_ID})
+    assert r.status == 202 and r.body["wall"] == "audiobooks"
+    renders_after(conductor, count)
+    assert conductor.snapshot()["wall"] == "audiobooks"
+
+
+def test_show_rejects_unknown_and_bad_bodies(http, conductor):
+    r = http.post("/show", {"screen": "comics"})
+    assert r.status == 404 and r.body["walls"] == ["audiobooks", "light_novels"]
+    assert http.post("/show", {}).status == 400
+    assert http.post("/show", raw=b"{nope").status == 400
+
+
+def test_badge_redraws_and_persists(http, conductor):
+    before = rendered(conductor)
+    count = render_count(conductor)
+    r = http.post("/badge", {"message_waiting": True, "dnd": False, "from": "Jasmine"})
+    assert r.status == 202 and r.body["redraw"] is True
+    assert r.body["badge"]["message_waiting"] is True and r.body["badge"]["from"] == "Jasmine"
+    after = renders_after(conductor, count)
+    assert after != before
+    assert read_state(estante_ctl.state_file(conductor.cfg))["badge"]["from"] == "Jasmine"
+    assert conductor.snapshot()["badge"]["message_waiting"] is True
+    r = http.post("/badge", {"message_waiting": True, "from": "Jasmine"})
+    assert r.status == 202 and r.body["redraw"] is False
+    assert http.post("/badge", raw=b"[1]").status == 400
+
+
+def test_screen_off_blanks_and_stops_blits(http, conductor, fake_abs):
+    shown = rendered(conductor)
+    r = http.post("/screen", {"on": False})
+    assert r.status == 202 and r.body == {"screen": {"on": False, "dim": 1.0}}
+    assert conductor.fb.blank_calls == [True]
+    count = render_count(conductor)
+    bump_progress(fake_abs, seconds=3 * 3600)
+    time.sleep(1.0)
+    assert render_count(conductor) == count
+    assert frame(conductor) == shown
+    assert read_state(estante_ctl.state_file(conductor.cfg))["screen"] == {"on": False, "dim": 1.0}
+    assert conductor.snapshot()["screen"] == {"on": False, "dim": 1.0}
+
+
+def test_unblank_triggers_redraw(http, conductor, fake_abs):
+    shown = rendered(conductor)
+    http.post("/screen", {"on": False})
+    bump_progress(fake_abs, seconds=3 * 3600)
+    time.sleep(0.8)
+    count = render_count(conductor)
+    r = http.post("/screen", {"on": True})
+    assert r.status == 202 and r.body["screen"]["on"] is True
+    after = renders_after(conductor, count)
+    assert conductor.fb.blank_calls == [True, False]
+    assert after != shown
+
+
+def test_screen_off_paints_black_when_blank_is_refused(make_conductor):
+    c = make_conductor(fb_cls=NoBlankFramebuffer)
+    rendered(c)
+    c.set_screen(on=False)
+    assert c.fb.blank_calls == [True]
+    assert frame(c) == bytes(1920 * 1080 * 2)
+
+
+def test_screen_off_during_render_wins(make_conductor, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    real = estante_ctl.render_screen
+
+    def slow(view, size):
+        entered.set()
+        release.wait(10)
+        return real(view, size)
+
+    monkeypatch.setattr(estante_ctl, "render_screen", slow)
+    c = make_conductor()
+    assert entered.wait(15)
+    before = frame(c)
+    c.set_screen(on=False)
+    release.set()
+    wait_until(lambda: not c.snapshot()["busy"])
+    time.sleep(0.5)
+    assert frame(c) == before
+    assert c.snapshot()["last_render"] is None
+    assert c.fb.blank_calls == [True]
+
+
+def test_dim_redraws_darker_and_validates(http, conductor):
+    before = rendered(conductor)
+    count = render_count(conductor)
+    r = http.post("/screen", {"dim": 0.5})
+    assert r.status == 202 and r.body == {"screen": {"on": True, "dim": 0.5}}
+    after = renders_after(conductor, count)
+    box = (50, 90, 570, 610)
+    assert brightness(after, box) < brightness(before, box) * 0.7
+    assert read_state(estante_ctl.state_file(conductor.cfg))["screen"]["dim"] == 0.5
+    for bad in ({"dim": 1.5}, {"dim": -0.1}, {"dim": "x"}, {"dim": True}, {"on": "yes"}, [1]):
+        r = http.post("/screen", bad)
+        assert r.status == 400, bad
+    assert http.post("/screen", raw=b"{nope").status == 400
+    assert conductor.snapshot()["screen"] == {"on": True, "dim": 0.5}
+
+
+def test_screen_state_survives_a_restart(make_conductor, tmp_path):
+    state = tmp_path / "state" / "state.json"
+    write_state({"screen": {"on": False, "dim": 0.4}}, str(state))
+    c = make_conductor()
+    wait_until(lambda: c.fb.blank_calls == [True])
+    wait_until(lambda: c.snapshot()["now_listening"] is not None)
+    time.sleep(0.5)
+    assert frame(c) == bytes(1920 * 1080 * 2)
+    assert c.snapshot()["screen"] == {"on": False, "dim": 0.4}
+    assert c.snapshot()["last_render"] is None
+    c.set_screen(on=True)
+    rendered(c)
+    assert c.fb.blank_calls == [True, False]
+
+
+def test_state_snapshot_keys(http, conductor):
+    rendered(conductor)
+    r = http.get("/state")
+    assert r.status == 200 and r.content_type == "application/json"
+    assert set(r.body) == SNAPSHOT_KEYS
+    assert set(r.body["screen"]) == {"on", "dim"}
+    assert set(r.body["now_listening"]) == {"item_id", "title", "pct"}
+    assert r.body["busy"] in (True, False)
+    assert r.body["last_render"].endswith("+00:00")
+
+
+def test_unknown_route_wrong_method_and_500(http, conductor, monkeypatch):
+    r = http.get("/nope")
+    assert r.status == 404 and r.content_type == "application/json"
+    assert http.get("/swap").status == 405
+    assert http.post("/state").status == 405
+    assert http.request("DELETE", "/screen").status == 405
+
+    def boom():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(conductor, "snapshot", boom)
+    r = http.get("/state")
+    assert r.status == 500 and r.body == {"error": "boom"}
+
+
+# pending actions
+
+
+def test_user_actions_replace_each_other_and_redraw_never_wins(make_conductor):
+    c = make_conductor(start=False)
+    c.request("redraw")
+    assert c._pending == ("redraw", None)
+    c.request("swap")
+    assert c._pending == ("swap", None)
+    c.request("redraw")
+    assert c._pending == ("swap", None)
+    c.request("show", "light_novels")
+    assert c._pending == ("show", 1)
+    c.request("redraw")
+    assert c._pending == ("show", 1)
+    c.request("show", "Audiobooks")
+    assert c._pending == ("show", 0)
+    with pytest.raises(KeyError):
+        c.request("show", "comics")
+    with pytest.raises(ValueError):
+        c.request("jump")
+
+
+# failures
+
+
+def test_poll_failure_keeps_last_frame(conductor, fake_abs, caplog):
+    shown = rendered(conductor)
+    count = render_count(conductor)
+    caplog.set_level(logging.WARNING, logger="estante-ctl")
+    fake_abs.fail_with = 500
+    bump_progress(fake_abs, seconds=3 * 3600)
+    time.sleep(1.2)
+    assert conductor.is_alive()
+    assert render_count(conductor) == count
+    assert frame(conductor) == shown
+    failures = [r for r in caplog.records if "Audiobookshelf" in r.getMessage()]
+    assert len(failures) == 1
+    fake_abs.fail_with = None
+    renders_after(conductor, count)
+
+
+def test_startup_without_network_retries(make_conductor, fake_abs):
+    c = make_conductor(abs_url=f"http://127.0.0.1:{closed_port()}")
+    server = estante_ctl.serve(c.cfg, c)
+    try:
+        http = Http(server)
+        wait_until(lambda: frame(c) == mark_bytes())
+        time.sleep(0.6)
+        assert c.is_alive()
+        r = http.get("/state")
+        assert r.status == 200 and r.body["last_render"] is None and r.body["now_listening"] is None
+        assert http.post("/badge", {"dnd": True}).status == 202
+        c.client.base_url = fake_abs.base_url
+        rendered(c)
+        assert c.snapshot()["now_listening"]["item_id"] == IN_PROGRESS_ID
     finally:
         server.shutdown()
         server.server_close()
 
 
-def test_shelf_page_wraps_at_page_count(fake_inkypi, tmp_state, make_conductor):
-    write_state({"page_counts": {AUDIOBOOKS_ID: 2}, "pages": {AUDIOBOOKS_ID: 1}}, str(tmp_state))
-    conductor = make_conductor(rotate_minutes=10, poll_minutes=10)
-    wait_until(lambda: fake_inkypi.displays, 5)
-    wait_until(lambda: not conductor.snapshot()["busy"], 3)
-    conductor.request("show", "The shelf")
-    wait_until(lambda: len(fake_inkypi.displays) >= 2, 3)
-    assert read_state(str(tmp_state))["pages"][AUDIOBOOKS_ID] == 0
+def test_missing_abs_url_never_crashes(make_conductor):
+    c = make_conductor(abs_url="")
+    wait_until(lambda: frame(c) == mark_bytes())
+    time.sleep(0.5)
+    assert c.is_alive() and c.snapshot()["last_render"] is None
 
 
-def test_now_listening_watch_redraws_on_key_change(fake_inkypi, fake_abs, make_conductor):
-    progress = json.loads((FIXTURES / f"progress_{IN_PROGRESS_ID}.json").read_text())
-    make_conductor(rotate_minutes=10, poll_minutes=0.01, min_redraw_minutes=0.04)
-    wait_until(lambda: fake_inkypi.displays, 5)
-    time.sleep(1.0)
-    assert len(fake_inkypi.displays) == 1
+def test_wait_for_exit_reports_a_dead_conductor(make_conductor, monkeypatch):
+    c = make_conductor(start=False)
 
-    moved = dict(progress, currentTime=progress["currentTime"] + 3000)
-    fake_abs.override(PROGRESS_PATH, moved)
-    wait_until(lambda: len(fake_inkypi.displays) >= 2, 4)
-    assert fake_inkypi.displays[1] == ("Default", "now_listening", "Now listening")
+    def crash():
+        raise AbsError("boom")
 
-    moved_again = dict(progress, currentTime=progress["currentTime"] + 6000)
-    fake_abs.override(PROGRESS_PATH, moved_again)
-    time.sleep(1.5)
-    assert len(fake_inkypi.displays) == 2
-
-    wait_until(lambda: len(fake_inkypi.displays) >= 3, 4)
-    time.sleep(3.0)
-    assert len(fake_inkypi.displays) == 3
-
-
-def test_watch_disabled_without_abs_creds(fake_inkypi, make_conductor):
-    make_conductor(with_abs=False)
-    wait_until(lambda: len(fake_inkypi.displays) >= 2, 5)
-    assert names(fake_inkypi)[:2] == ["Now listening", "The shelf"]
-
-
-def test_rotation_survives_inkypi_500(fake_inkypi, running_conductor):
-    wait_until(lambda: fake_inkypi.displays, 5)
-    fake_inkypi.fail_next(1)
-    wait_until(lambda: fake_inkypi.failed, 5)
-    count = len(fake_inkypi.displays)
-    wait_until(lambda: len(fake_inkypi.displays) > count, 5)
-    assert running_conductor.is_alive()
-
-
-def test_screens_retries_on_partial_json(tmp_path):
-    with FakeInkyPi() as fake:
-        full = Path(fake.device_json).read_text()
-    path = tmp_path / "device.json"
-    path.write_text("{")
-
-    def finish():
-        time.sleep(0.3)
-        path.write_text(full)
-
-    t = threading.Thread(target=finish)
-    t.start()
-    screens = estante_ctl.InkyPi("http://127.0.0.1:9").screens(str(path), "Default")
-    t.join()
-    assert [s.name for s in screens] == ["Now listening", "The shelf", "Light novels"]
-    assert [s.slug for s in screens] == ["now_listening", "the_shelf", "light_novels"]
-    assert screens[1].settings == {"library_id": AUDIOBOOKS_ID}
-
-
-def test_screens_missing_playlist_or_file(tmp_path, fake_inkypi):
-    inky = estante_ctl.InkyPi(fake_inkypi.url)
-    assert inky.screens(fake_inkypi.device_json, "Nope") == []
-    assert inky.screens(str(tmp_path / "absent.json"), "Default") == []
-
-
-def test_inkypi_display_false_on_error(fake_inkypi):
-    inky = estante_ctl.InkyPi(fake_inkypi.url)
-    assert inky.ready() is True
-    fake_inkypi.fail_next(1)
-    assert inky.display("Default", "the_shelf", "The shelf") is False
-    assert inky.display("Default", "the_shelf", "The shelf") is True
-    assert estante_ctl.InkyPi("http://127.0.0.1:9").ready() is False
-
-
-def test_state_snapshot_fields(http, conductor):
-    reply = http.get("/state")
-    assert reply.status == 200
-    assert reply.content_type == "application/json"
-    snap = reply.body
-    assert set(snap) == SNAPSHOT_KEYS
-    assert snap["screen"] == "Now listening"
-    assert snap["screens"] == ["Now listening", "The shelf", "Light novels"]
-    assert snap["badge"] == {"message_waiting": False, "dnd": False, "count": 0, "from": ""}
-    assert snap["busy"] is False
-    assert snap["last_display"]["screen"] == "Now listening"
-    assert snap["last_display"]["plugin_id"] == "now_listening"
-    assert isinstance(snap["next_rotation"], str)
-    assert snap["rotate_minutes"] == 10
-
-
-def test_unknown_route_and_wrong_method(http):
-    assert http.get("/nope").status == 404
-    assert http.post("/nope").status == 404
-    assert http.get("/swap").status == 405
-    assert http.post("/state").status == 405
-    assert http.request("DELETE", "/badge").status == 405
-
-
-def test_helpers(tmp_path, monkeypatch):
-    assert estante_ctl.slug("Now listening") == "now_listening"
-    assert estante_ctl.slug("  Light Novels! ") == "light_novels"
-    env = tmp_path / ".env"
-    env.write_text('# comment\nABS_URL="http://abs.local:13378"\nABS_TOKEN=\'abc\'\n\nexport X=1\nJUNK\n')
-    assert estante_ctl.parse_env_file(str(env)) == {
-        "ABS_URL": "http://abs.local:13378",
-        "ABS_TOKEN": "abc",
-        "X": "1",
-    }
-    assert estante_ctl.parse_env_file(str(tmp_path / "missing")) == {}
-    cfg_file = tmp_path / "estante.json"
-    cfg_file.write_text(json.dumps({"rotate_minutes": 0.5, "port": 9999}))
-    cfg = estante_ctl.load_config(str(cfg_file))
-    assert cfg["rotate_minutes"] == 0.5 and cfg["port"] == 9999
-    assert cfg["playlist"] == "Default"
-    monkeypatch.setenv("ESTANTE_CONFIG", str(cfg_file))
-    assert estante_ctl.load_config(None)["port"] == 9999
-    monkeypatch.delenv("ESTANTE_CONFIG")
-    defaults = estante_ctl.load_config(None)
-    assert {k: v for k, v in defaults.items() if k != "inkypi_env"} == {
-        k: v for k, v in estante_ctl.DEFAULTS.items() if k != "inkypi_env"
-    }
-
-
-def test_inkypi_env_derived_from_real_src(tmp_path):
-    # InkyPi's installer links /usr/local/inkypi/src to the checkout's src, and InkyPi
-    # reads .env from the checkout root, found through the real path.
-    root = tmp_path / "InkyPi"
-    (root / "src" / "config").mkdir(parents=True)
-    (root / "src" / "config" / "device.json").write_text("{}")
-    other = tmp_path / "usr-local-inkypi"
-    other.mkdir()
-    (other / "src").symlink_to(root / "src")
-    cfg_file = tmp_path / "estante.json"
-    cfg_file.write_text(json.dumps({"inkypi_device_json": str(other / "src" / "config" / "device.json")}))
-    cfg = estante_ctl.load_config(str(cfg_file))
-    assert cfg["inkypi_env"] == str((root / ".env").resolve())
-
-    cfg_file.write_text(json.dumps({"inkypi_env": "/etc/explicit.env"}))
-    assert estante_ctl.load_config(str(cfg_file))["inkypi_env"] == "/etc/explicit.env"
-    assert estante_ctl.DEFAULTS["inkypi_env"] == ""
-
-
-def test_example_config_matches_defaults():
-    example = json.loads((REPO / "ctl" / "estante.example.json").read_text())
-    assert example == estante_ctl.DEFAULTS
-
-
-def test_malformed_status_line_does_not_stop_rotation(fake_inkypi, make_conductor):
-    fake_inkypi.malformed_next(1)
-    conductor = make_conductor()
-    wait_until(lambda: fake_inkypi.malformed, 5)
-    wait_until(lambda: len(fake_inkypi.displays) >= 2, 6)
-    assert conductor.is_alive()
-    fake_inkypi.malformed_next(3)
-    wait_until(lambda: len(fake_inkypi.malformed) >= 4, 8)
-    times = [t for t, _ in fake_inkypi.malformed[1:4]]
-    # each failed attempt pushes the next one out by min(60 s, 1.2 s rotation), not one tick
-    assert all(b - a >= 1.0 for a, b in zip(times, times[1:]))
-    wait_until(lambda: not conductor.snapshot()["busy"], 3)
-    assert conductor._next_due > conductor.clock()
-    count = len(fake_inkypi.displays)
-    wait_until(lambda: len(fake_inkypi.displays) > count, 5)
-    assert conductor.is_alive()
-
-
-def test_redraw_never_replaces_a_queued_show(http, fake_inkypi, conductor):
-    fake_inkypi.delay_s = 1.0
-    assert http.post("/swap").status == 202
-    wait_until(lambda: conductor.snapshot()["busy"], 2)
-    assert http.post("/show", {"screen": "light_novels"}).status == 202
-    reply = http.post("/badge", {"message_waiting": True})
-    assert reply.body["redraw"] is True
-    wait_until(lambda: len(fake_inkypi.displays) >= 3, 5)
-    assert names(fake_inkypi)[:3] == ["Now listening", "The shelf", "Light novels"]
-    time.sleep(1.5)
-    assert len(fake_inkypi.displays) == 3
-
-
-def test_show_replaces_a_queued_redraw(conductor):
-    conductor.request("redraw")
-    assert conductor._pending == ("redraw", None)
-    conductor.request("show", "the_shelf")
-    assert conductor._pending == ("show", "The shelf")
-    conductor.request("swap")
-    assert conductor._pending == ("swap", None)
-    conductor.request("redraw")
-    assert conductor._pending == ("swap", None)
-
-
-def test_startup_show_clears_a_boot_time_redraw(fake_inkypi, make_conductor, tmp_state):
-    conductor = make_conductor(start=False, rotate_minutes=10, poll_minutes=10)
-    badge, changed = conductor.set_badge({"message_waiting": True})
-    assert changed is True
-    conductor.start()
-    wait_until(lambda: fake_inkypi.displays, 5)
-    time.sleep(1.0)
-    assert names(fake_inkypi) == ["Now listening"]
-    assert read_state(str(tmp_state))["badge"]["message_waiting"] is True
-
-
-def test_startup_keeps_a_boot_time_show(fake_inkypi, make_conductor):
-    conductor = make_conductor(start=False, rotate_minutes=10, poll_minutes=10)
-    conductor.request("show", "Light novels")
-    conductor.set_badge({"dnd": True})
-    conductor.start()
-    wait_until(lambda: len(fake_inkypi.displays) >= 2, 5)
-    assert names(fake_inkypi)[:2] == ["Now listening", "Light novels"]
-
-
-def test_unexpected_handler_error_answers_json_500(http, conductor, monkeypatch):
-    def boom(incoming):
-        raise RuntimeError("state dir is read-only")
-
-    monkeypatch.setattr(conductor, "set_badge", boom)
-    reply = http.post("/badge", {"dnd": True})
-    assert reply.status == 500
-    assert reply.content_type == "application/json"
-    assert reply.body == {"error": "state dir is read-only"}
-
-
-def test_wait_for_exit_reports_a_dead_conductor(make_conductor):
-    def broken_wait():
-        raise RuntimeError("boom")
-
-    conductor = make_conductor(start=False)
-    conductor._wait_ready = broken_wait
-    conductor.start()
-    conductor.join(timeout=5)
-    assert estante_ctl.wait_for_exit(threading.Event(), conductor, interval=0.05) == 1
+    monkeypatch.setattr(c, "_run", crash)
+    c.start()
+    c.join(timeout=5)
+    assert estante_ctl.wait_for_exit(threading.Event(), c, interval=0.01) == 1
     done = threading.Event()
     done.set()
-    assert estante_ctl.wait_for_exit(done, conductor, interval=0.05) == 0
+    assert estante_ctl.wait_for_exit(done, c, interval=0.01) == 0
 
 
-def _single_screen_playlist(fake, index):
-    data = json.loads(Path(fake.device_json).read_text())
-    playlist = data["playlist_config"]["playlists"][0]
-    playlist["plugins"] = playlist["plugins"][index:index + 1]
-    Path(fake.device_json).write_text(json.dumps(data))
+def test_a_render_that_raises_is_retried_next_poll(make_conductor, monkeypatch):
+    real = estante_ctl.render_screen
+    calls = []
+
+    def flaky(view, size):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("first render fails")
+        return real(view, size)
+
+    monkeypatch.setattr(estante_ctl, "render_screen", flaky)
+    c = make_conductor()
+    rendered(c)
+    assert len(calls) == 2 and c.is_alive()
 
 
-def test_single_screen_that_always_fails_backs_off(fake_inkypi, make_conductor, tmp_state):
-    _single_screen_playlist(fake_inkypi, 1)
-    fake_inkypi.fail_next(10**6)
-    conductor = make_conductor()
-    wait_until(lambda: fake_inkypi.failed, 5)
-    started = time.monotonic()
-    wait_until(lambda: not conductor.snapshot()["busy"], 3)
-    first_due = conductor._next_due
-    wait_until(lambda: len(fake_inkypi.failed) >= 3, 8)
-    # two backoffs of min(60 s, 1.2 s rotation) between the first and third attempt, not ticks
-    assert time.monotonic() - started >= 2.0
-    assert conductor.is_alive()
-    wait_until(lambda: not conductor.snapshot()["busy"], 3)
-    assert conductor._next_due > first_due > 0
-    assert fake_inkypi.displays == []
-    assert AUDIOBOOKS_ID not in read_state(str(tmp_state))["pages"]
-
-
-def test_failing_screen_is_skipped_each_cycle(fake_inkypi, make_conductor):
-    fake_inkypi.fail_instances.add("The shelf")
-    conductor = make_conductor()
-    wait_until(lambda: len(fake_inkypi.displays) >= 4, 12)
-    assert fake_inkypi.attempts[:6] == [
-        "Now listening", "The shelf", "Light novels",
-        "Now listening", "The shelf", "Light novels",
-    ]
-    assert names(fake_inkypi)[:4] == ["Now listening", "Light novels", "Now listening", "Light novels"]
-    assert conductor.is_alive()
-
-
-def test_swap_after_a_failure_shows_the_screen_after_it(http, fake_inkypi, conductor):
-    fake_inkypi.fail_instances.add("The shelf")
-    assert http.post("/swap").status == 202
-    wait_until(lambda: fake_inkypi.failed, 3)
-    wait_until(lambda: not conductor.snapshot()["busy"], 3)
-    assert conductor.snapshot()["screen"] == "Now listening"
-    assert http.post("/swap").status == 202
-    wait_until(lambda: len(fake_inkypi.displays) >= 2, 3)
-    assert fake_inkypi.displays[1][2] == "Light novels"
-    assert fake_inkypi.attempts[:3] == ["Now listening", "The shelf", "Light novels"]
-
-
-def test_failed_show_retries_that_screen_on_its_next_turn(fake_inkypi, make_conductor):
-    conductor = make_conductor(rotate_minutes=0.03, poll_minutes=10)
-    wait_until(lambda: fake_inkypi.displays, 5)
-    wait_until(lambda: not conductor.snapshot()["busy"], 3)
-    fake_inkypi.fail_next(1)
-    conductor.request("show", "Light novels")
-    wait_until(lambda: fake_inkypi.failed, 3)
-    wait_until(lambda: len(fake_inkypi.displays) >= 2, 5)
-    assert fake_inkypi.attempts[:3] == ["Now listening", "Light novels", "Light novels"]
-    assert names(fake_inkypi)[:2] == ["Now listening", "Light novels"]
-
-
-def test_failed_shelf_show_keeps_the_page(fake_inkypi, tmp_state, make_conductor):
-    write_state({"page_counts": {AUDIOBOOKS_ID: 7}, "pages": {AUDIOBOOKS_ID: 3}}, str(tmp_state))
-    conductor = make_conductor(rotate_minutes=10, poll_minutes=10)
-    wait_until(lambda: fake_inkypi.displays, 5)
-    wait_until(lambda: not conductor.snapshot()["busy"], 3)
-    for screen in ("The shelf", "Light novels"):
-        count = len(fake_inkypi.failed)
-        fake_inkypi.fail_next(1)
-        conductor.request("show", screen)
-        wait_until(lambda: len(fake_inkypi.failed) > count, 3)
-        wait_until(lambda: not conductor.snapshot()["busy"], 3)
-    pages = read_state(str(tmp_state))["pages"]
-    assert pages == {AUDIOBOOKS_ID: 3}
-    conductor.request("show", "The shelf")
-    wait_until(lambda: len(fake_inkypi.displays) >= 2, 3)
-    assert read_state(str(tmp_state))["pages"][AUDIOBOOKS_ID] == 4
-
-
-def test_page_advance_error_neither_blocks_nor_refires(fake_inkypi, make_conductor):
-    conductor = make_conductor(start=False)
-    busy_at_advance = []
-
-    def broken_advance(screen):
-        busy_at_advance.append(conductor._busy)
-        raise OSError("read-only state dir")
-
-    conductor._advance_page = broken_advance
-    conductor.start()
-    wait_until(lambda: len(fake_inkypi.displays) >= 3, 8)
-    assert names(fake_inkypi)[:3] == ["Now listening", "The shelf", "Light novels"]
-    assert busy_at_advance and all(busy_at_advance)
-    # one advance attempt per shelf show, not one per tick
-    assert len(busy_at_advance) <= 3
-
-
-def test_abs_credentials_are_read_lazily(fake_inkypi, fake_abs, make_conductor, caplog):
-    caplog.set_level(logging.INFO, logger="estante-ctl")
-    creds = {"ok": False}
-    conductor = make_conductor(start=False, rotate_minutes=10, poll_minutes=0.01, min_redraw_minutes=0)
-
-    def factory():
-        return AbsClient(fake_abs.base_url, "TESTTOKEN", timeout=5) if creds["ok"] else None
-
-    conductor.abs_factory = factory
-    conductor.start()
-    wait_until(lambda: fake_inkypi.displays, 5)
-    time.sleep(1.5)
-    assert len(fake_inkypi.displays) == 1
-    disabled = [r for r in caplog.records if "watch disabled" in r.getMessage()]
-    assert len(disabled) == 1
-    creds["ok"] = True
-    wait_until(lambda: len(fake_inkypi.displays) >= 2, 4)
-    assert names(fake_inkypi)[:2] == ["Now listening", "Now listening"]
-    enabled = [r for r in caplog.records if "watch enabled" in r.getMessage()]
-    assert len(enabled) == 1
-
-
-def test_display_timeout_and_listen_default():
-    # a cold mosaic render fetches up to 900 covers before InkyPi answers
-    assert estante_ctl.DISPLAY_TIMEOUT_S == 600
-    assert estante_ctl.DEFAULTS["listen"] == "127.0.0.1"
+def test_single_wall_swap_redraws(make_conductor):
+    c = make_conductor(walls=[{"name": "audiobooks", "library_id": "", "title": "The shelf"}])
+    server = estante_ctl.serve(c.cfg, c)
+    try:
+        http = Http(server)
+        before = rendered(c)
+        assert c.snapshot()["walls"] == ["audiobooks"]
+        count = render_count(c)
+        r = http.post("/swap")
+        assert r.status == 202 and r.body == {"queued": "redraw"}
+        after = renders_after(c, count)
+        assert after == before
+        assert c.snapshot()["wall"] == "audiobooks"
+        r = http.post("/show", {"screen": "light_novels"})
+        assert r.status == 404 and r.body["walls"] == ["audiobooks"]
+        assert http.post("/show", {"screen": "audiobooks"}).status == 202
+    finally:
+        server.shutdown()
+        server.server_close()

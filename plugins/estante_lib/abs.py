@@ -31,6 +31,7 @@ class AbsClient:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 return resp.read()
         except urllib.error.HTTPError as e:
+            e.close()  # the error carries the open response; gc would warn about its socket
             if none_on_404 and e.code == 404:
                 return None
             raise AbsError(f"Audiobookshelf {self.host}: HTTP {e.code} on {path}") from e

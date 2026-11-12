@@ -135,3 +135,30 @@ def test_to_fb_bytes_bgrx_is_fast_at_1080p():
     out = to_fb_bytes(img, FbInfo(1920, 1080, 32, 7680))
     assert time.perf_counter() - start < 0.2
     assert len(out) == 1920 * 1080 * 4
+
+
+def test_load_image_squares_and_tolerates_junk(tmp_path):
+    from PIL import Image
+
+    from estante_lib.render_screen import load_image
+
+    path = tmp_path / "tall.jpg"
+    Image.new("RGB", (120, 180), (200, 10, 10)).save(path)
+    assert load_image(str(path)).size == (120, 180)
+    img = load_image(str(path), square=120)
+    assert img.size == (120, 120) and img.mode == "RGB"
+    junk = tmp_path / "junk.jpg"
+    junk.write_bytes(b"not a jpeg")
+    assert load_image(str(junk)) is None
+    assert load_image(str(tmp_path / "missing.jpg")) is None
+
+
+def test_render_mark_centres_estante():
+    from estante_lib.render_screen import render_mark
+    from estante_lib.theme import DARK
+
+    img = render_mark(DARK, (1920, 1080))
+    assert img.size == (1920, 1080) and img.getpixel((0, 0)) == DARK.bg
+    box = img.crop((760, 500, 1160, 580))
+    assert DARK.mark in {c for _, c in box.getcolors(1 << 16)}
+    assert img.crop((0, 0, 700, 1080)).getcolors(1) == [(700 * 1080, DARK.bg)]
