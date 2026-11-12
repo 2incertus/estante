@@ -25,7 +25,7 @@ PROGRESS_PATH = f"/api/me/progress/{IN_PROGRESS_ID}"
 AUDIOBOOKS_ID = "b14de8f5-99a5-4cba-b970-6a2cb65f2993"
 LIGHT_NOVELS_ID = "65bcd45d-1cce-496c-950e-4f3aabf5f5eb"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
-SNAPSHOT_KEYS = {"wall", "walls", "badge", "screen", "busy", "last_render", "now_listening"}
+SNAPSHOT_KEYS = {"wall", "walls", "badge", "screen", "busy", "last_render", "now_listening", "shelf"}
 TWO_WALLS = [
     {"name": "audiobooks", "library_id": ""},
     {"name": "light_novels", "library_id": ""},
@@ -224,6 +224,7 @@ def test_defaults_and_example_config():
     assert d["fb_device"] == "/dev/fb0" and d["fb_sysfs"] == "/sys/class/graphics/fb0"
     assert d["fb_file"] == "" and d["fb_size"] == [1920, 1080] and d["fb_bpp"] == 16
     assert d["theme"] == "dark" and d["state_dir"] == "/var/lib/estante"
+    assert d["shelf_minutes"] == 2
     example = json.loads((REPO / "ctl" / "estante.example.json").read_text())
     assert example == d
 
@@ -407,20 +408,26 @@ def test_framebuffer_smaller_than_canvas(make_conductor):
 # routes
 
 
-def test_swap_changes_the_wall_and_its_header(http, conductor):
+def test_swap_turns_to_the_next_shelf_and_resets_the_timer(http, conductor):
     before = rendered(conductor)
+    shelf = http.get("/state").body["shelf"]
+    assert shelf["section"] == 1 and 3 <= shelf["sections"] <= 6
     count = render_count(conductor)
     r = http.post("/swap")
-    assert r.status == 202 and r.body == {"queued": "swap"}
+    assert r.status == 202 and r.body == {"queued": "next_shelf", "section": 2}
     after = renders_after(conductor, count)
-    assert conductor.snapshot()["wall"] == "light_novels"
-    assert region(after, HEADER) != region(before, HEADER)
-    assert read_state(estante_ctl.state_file(conductor.cfg))["wall"] == "light_novels"
-    count = render_count(conductor)
-    http.post("/swap")
-    back = renders_after(conductor, count)
+    # one wall stays the unit of library: the swap turns the shelf, not the wall
     assert conductor.snapshot()["wall"] == "audiobooks"
-    assert region(back, HEADER) == region(before, HEADER)
+    assert region(after, HEADER) != region(before, HEADER)
+    assert read_state(estante_ctl.state_file(conductor.cfg))["pages"][AUDIOBOOKS_ID] == 1
+    turned = http.get("/state").body["shelf"]
+    assert turned["section"] == 2 and turned["next_turn"] >= shelf["next_turn"]
+    # past the last section the shelf starts again at the first
+    for k in range(3, shelf["sections"] + 1):
+        assert http.post("/swap").body == {"queued": "next_shelf", "section": k}
+    assert http.post("/swap").body == {"queued": "next_shelf", "section": 1}
+    # the swaps before it may still be drawing: wait for the frame of section 1
+    wait_until(lambda: region(frame(conductor), HEADER) == region(before, HEADER))
 
 
 def test_show_by_name_and_by_id(http, conductor):
@@ -598,10 +605,10 @@ def test_user_actions_replace_each_other_and_redraw_never_wins(make_conductor):
     c = make_conductor(start=False)
     c.request("redraw")
     assert c._pending == ("redraw", None)
-    c.request("swap")
-    assert c._pending == ("swap", None)
+    c.request("show", "light_novels")
+    assert c._pending == ("show", 1)
     c.request("redraw")
-    assert c._pending == ("swap", None)
+    assert c._pending == ("show", 1)
     c.request("show", "light_novels")
     assert c._pending == ("show", 1)
     c.request("redraw")
@@ -702,9 +709,9 @@ def test_single_wall_swap_redraws(make_conductor):
         assert c.snapshot()["walls"] == ["audiobooks"]
         count = render_count(c)
         r = http.post("/swap")
-        assert r.status == 202 and r.body == {"queued": "redraw"}
+        assert r.status == 202 and r.body == {"queued": "next_shelf", "section": 2}
         after = renders_after(c, count)
-        assert after == before
+        assert after != before
         assert c.snapshot()["wall"] == "audiobooks"
         r = http.post("/show", {"screen": "light_novels"})
         assert r.status == 404 and r.body["walls"] == ["audiobooks"]
@@ -717,10 +724,10 @@ def test_single_wall_swap_redraws(make_conductor):
 # fix round 1
 
 
-def test_failed_swap_keeps_the_shown_wall_until_abs_answers(http, conductor, fake_abs):
+def test_failed_wall_show_keeps_the_shown_wall_until_abs_answers(http, conductor, fake_abs):
     before = rendered(conductor)
     fake_abs.fail_with = 500
-    assert http.post("/swap").status == 202
+    assert http.post("/show", {"screen": "light_novels"}).status == 202
     wait_until(lambda: conductor._pending is None)
     time.sleep(0.5)
     wait_until(lambda: not conductor.snapshot()["busy"])
@@ -903,3 +910,172 @@ def test_screen_answers_202_when_the_state_cannot_be_saved(http, conductor, tmp_
     assert conductor.fb.blank_calls[-1] is True
     assert conductor.snapshot()["screen"]["on"] is False
     assert any("screen" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+
+
+# v3: the shelf of spines turns
+
+
+def _plan():
+    from estante_lib.model import progress_index, shelf_parts
+    from estante_lib.render_spines import plan_sections
+
+    items = fixture_json("audiobooks.json")["results"]
+    books, runs, hours, _ = shelf_parts(items, progress_index(fixture_json("me.json")))
+    return items, plan_sections(runs, hours)
+
+
+def listen_to(fake_abs, item):
+    """Make `item` the book in progress: items-in-progress, its detail and an empty progress."""
+    fake_abs.override("/api/me/items-in-progress", {"libraryItems": [dict(item, mediaType="book")]})
+    fake_abs.override(f"/api/items/{item['id']}", item)
+    fake_abs.override(f"/api/me/progress/{item['id']}", {"currentTime": 60, "lastUpdate": 1})
+
+
+def last_section_book():
+    items, plan = _plan()
+    item_id = plan[-1][0][0][1][0].book.item_id
+    return next(it for it in items if it["id"] == item_id), len(plan)
+
+
+ONE_WALL = [{"name": "audiobooks", "library_id": ""}]
+
+
+def shelf_of(c):
+    return c.snapshot()["shelf"]
+
+
+def test_the_shelf_turns_after_shelf_minutes(make_conductor):
+    c = make_conductor(walls=ONE_WALL, shelf_minutes=0.01)
+    rendered(c)
+    count = render_count(c)
+    wait_until(lambda: shelf_of(c)["section"] == 2)
+    renders_after(c, count)
+    wait_until(lambda: shelf_of(c)["section"] == 3)
+    wait_until(lambda: read_state(estante_ctl.state_file(c.cfg))["pages"].get(AUDIOBOOKS_ID, 0) >= 2)
+
+
+def test_a_single_section_never_turns(make_conductor, fake_abs):
+    items = fixture_json("audiobooks.json")
+    fake_abs.override(f"/api/libraries/{AUDIOBOOKS_ID}/items", dict(items, results=items["results"][:3]))
+    c = make_conductor(walls=ONE_WALL, shelf_minutes=0.01)
+    rendered(c)
+    count = render_count(c)
+    time.sleep(1.0)
+    assert render_count(c) == count
+    assert shelf_of(c)["section"] == 1 and shelf_of(c)["sections"] == 1
+
+
+def test_rotation_keeps_turning_while_abs_is_down(make_conductor, fake_abs):
+    c = make_conductor(walls=ONE_WALL, shelf_minutes=0.02)
+    before = rendered(c)
+    fake_abs.fail_with = 500
+    count = render_count(c)
+    after = renders_after(c, count)
+    assert shelf_of(c)["section"] == 2
+    assert region(after, HEADER) != region(before, HEADER)
+    assert c.snapshot()["now_listening"]["item_id"] == IN_PROGRESS_ID
+
+
+def test_show_selects_a_section(http, conductor):
+    rendered(conductor)
+    n = shelf_of(conductor)["sections"]
+    r = http.post("/show", {"section": 3})
+    assert r.status == 202 and r.body == {"queued": "show", "section": 3}
+    assert shelf_of(conductor)["section"] == 3
+    r = http.post("/show", {"screen": "shelf 2"})
+    assert r.status == 202 and r.body == {"queued": "show", "section": 2}
+    assert http.post("/show", {"screen": "Shelf 1"}).body["section"] == 1
+    for bad in (n + 1, 0, -1):
+        r = http.post("/show", {"section": bad})
+        assert r.status == 404 and r.body["sections"] == n
+    assert http.post("/show", {"screen": f"shelf {n + 1}"}).status == 404
+    for bad in ("x", True, 1.5, None):
+        assert http.post("/show", {"section": bad}).status == 400
+    # the wall-name form still works beside it
+    assert http.post("/show", {"screen": "light_novels"}).body["wall"] == "light_novels"
+
+
+def test_state_reports_the_shelf(http, conductor):
+    rendered(conductor)
+    shelf = http.get("/state").body["shelf"]
+    assert set(shelf) == {"section", "sections", "next_turn"}
+    assert shelf["next_turn"].endswith("+00:00")
+
+
+def test_now_listening_change_jumps_to_its_section_once(make_conductor, fake_abs):
+    item, sections = last_section_book()
+    c = make_conductor(walls=ONE_WALL)
+    server = estante_ctl.serve(c.cfg, c)
+    try:
+        http = Http(server)
+        rendered(c)
+        assert shelf_of(c)["section"] == 1
+        count = render_count(c)
+        listen_to(fake_abs, item)
+        renders_after(c, count)
+        wait_until(lambda: shelf_of(c)["section"] == sections)
+        assert read_state(estante_ctl.state_file(c.cfg))["shelf_item"] == item["id"]
+        # a later swap is not undone by the next polls: the jump happened once
+        assert http.post("/swap").body["section"] == 1
+        time.sleep(1.0)
+        assert shelf_of(c)["section"] == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_swap_in_the_same_minute_wins_over_the_jump(make_conductor, fake_abs):
+    item, sections = last_section_book()
+    c = make_conductor(walls=ONE_WALL)
+    server = estante_ctl.serve(c.cfg, c)
+    try:
+        http = Http(server)
+        rendered(c)
+        assert http.post("/swap").body["section"] == 2
+        listen_to(fake_abs, item)
+        wait_until(lambda: c.snapshot()["now_listening"]["item_id"] == item["id"])
+        time.sleep(0.6)
+        assert shelf_of(c)["section"] == 2
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_the_section_survives_a_restart_without_a_jump(make_conductor, tmp_path):
+    write_state(
+        {"pages": {AUDIOBOOKS_ID: 2}, "shelf_item": IN_PROGRESS_ID}, str(tmp_path / "state" / "state.json")
+    )
+    c = make_conductor(walls=ONE_WALL)
+    rendered(c)
+    time.sleep(0.5)
+    assert shelf_of(c)["section"] == 3
+
+
+def test_the_first_poll_jumps_to_the_current_book(make_conductor, tmp_path):
+    # no item recorded yet: Overgeared, the book in progress, faces out on the first shelf
+    write_state({"pages": {AUDIOBOOKS_ID: 2}}, str(tmp_path / "state" / "state.json"))
+    c = make_conductor(walls=ONE_WALL)
+    rendered(c)
+    wait_until(lambda: shelf_of(c)["section"] == 1)
+
+
+def test_the_shelf_rests_while_the_screen_is_off(make_conductor):
+    c = make_conductor(walls=ONE_WALL, shelf_minutes=0.01)
+    rendered(c)
+    c.set_screen(on=False)
+    section = shelf_of(c)["section"]
+    time.sleep(1.2)
+    assert shelf_of(c)["section"] == section
+    c.set_screen(on=True)
+    wait_until(lambda: shelf_of(c)["section"] != section)
+
+
+def test_a_turn_is_drawn_once(make_conductor):
+    c = make_conductor(walls=ONE_WALL, shelf_minutes=0.03)
+    rendered(c)
+    count = render_count(c)
+    wait_until(lambda: shelf_of(c)["section"] == 2)
+    wait_until(lambda: render_count(c) > count)
+    # polls every 0.2 s see nothing new: the turn's frame is the only one before the next turn
+    time.sleep(0.8)
+    assert render_count(c) - count == 1

@@ -28,5 +28,6 @@
   ],
   "fb_bpp": 16,
   "cover_width": 120,
-  "now_cover_width": 520
+  "now_cover_width": 520,
+  "shelf_minutes": 2
 }
