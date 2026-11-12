@@ -99,7 +99,7 @@ estante-ctl reads this file (path from `ESTANTE_CONFIG`, set in the service unit
 | `fb_sysfs` | `/sys/class/graphics/fb0` | its sysfs directory: geometry, and `blank` for screen off |
 | `fb_file` | empty | when set, frames go to this regular file instead of the device (development) |
 | `fb_size`, `fb_bpp` | `[1920, 1080]`, `16` | the shape of `fb_file` |
-| `cover_width` | `160` | width of the shelf's cached covers (face-outs and spine colours); below the 186 px face-out, so face-out covers are scaled up a little; 200 keeps them sharp (every cover is fetched once more) |
+| `cover_width` | `200` | width of the shelf's cached covers (face-outs and spine colours); 200 keeps the 186 px face-outs sharp; a change refetches every cover once |
 | `now_cover_width` | `520` | width of the Now listening cover |
 | `shelf_minutes` | `2` | the shelf turns to its next section this often (not while the screen is off) |
 

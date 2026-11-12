@@ -219,7 +219,7 @@ def test_defaults_and_example_config():
     assert d["port"] == 8360
     assert d["walls"] == [{"name": "audiobooks", "library_id": "", "title": "The shelf"}]
     assert d["poll_seconds"] == 60 and d["wall_refresh_minutes"] == 15
-    assert d["cover_width"] == 160 and d["now_cover_width"] == 520
+    assert d["cover_width"] == 200 and d["now_cover_width"] == 520
     assert d["canvas"] == [1920, 1080] and d["rotate"] == 0
     assert d["fb_device"] == "/dev/fb0" and d["fb_sysfs"] == "/sys/class/graphics/fb0"
     assert d["fb_file"] == "" and d["fb_size"] == [1920, 1080] and d["fb_bpp"] == 16

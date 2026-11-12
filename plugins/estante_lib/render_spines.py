@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 from PIL import Image, ImageDraw, ImageOps
 
-from .model import STATUS_LISTENING, STATUS_READ, STATUS_UNREAD, ShelfBook, surname
+from .model import RUN_SERIES, STATUS_LISTENING, STATUS_READ, STATUS_UNREAD, ShelfBook, surname
 from .render_common import draw_footer
 from . import spine_text
 from .spine_text import (  # noqa: F401  (re-exported: tests and callers import them from here)
@@ -509,6 +509,39 @@ def _label_mask(text, room):
     return mask
 
 
+_HONORIFICS = {"md", "ma", "phd", "jr", "sr"}
+
+
+def _surnames(author):
+    """Every author's surname, comma-split as model.surname splits them, honorifics (MD, MA,
+    PhD, Jr., Sr.) skipped: "Amir Levine, MD, Rachel Heller, MA" -> "Levine, Heller"."""
+    names = []
+    for part in (author or "").split(","):
+        words = part.split()
+        if not words or (len(words) == 1 and words[0].lower().strip(".") in _HONORIFICS):
+            continue
+        while len(words) > 1 and words[-1].lower().strip(".") in _HONORIFICS:
+            words.pop()
+        names.append(words[-1])
+    return ", ".join(names)
+
+
+def _label_text(run, room):
+    """The run's label, or a shorter one that fits `room` whole: a series drops its count, an
+    author run keeps the surnames. When nothing fits, the series name or the full author name,
+    which _fit_label then ellipsizes."""
+    room = max(0, round(room))
+    if run.kind == RUN_SERIES:
+        candidates = [run.label, run.label.split(" · ")[0]]
+    else:
+        author = run.books[0].author if run.books else ""
+        candidates = [run.label, _surnames(author).upper()]
+    for text in candidates:
+        if text and _fit_label(text, room) == text:
+            return text
+    return candidates[0] if run.kind != RUN_SERIES else candidates[1]
+
+
 def _draw_label(canvas, x, y, text, room):
     """The label with its left edge at x and its middle on y, in the board's label colour."""
     mask = _label_mask(text, max(0, round(room)))
@@ -582,7 +615,8 @@ def render_section(view, theme, size=(BASE_W, BASE_H), scale=1.0):
                 canvas.paste(art, (px, base - piece.height))
                 px += piece.width + GAP
                 shown.append(book)
-            _draw_label(canvas, x + 1, base + 2 + (BOARD_H - 2) // 2, run.label, slot - 2)
+            label = _label_text(run, slot - 2)
+            _draw_label(canvas, x + 1, base + 2 + (BOARD_H - 2) // 2, label, slot - 2)
             x += slot
 
     total = view.counts.get("total", len(view.books))

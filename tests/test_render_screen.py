@@ -6,6 +6,7 @@ from PIL import ImageStat
 
 from estante_lib.display_fb import FbInfo, rgb_to_bgrx, rgb_to_rgb565
 from estante_lib.render_screen import ScreenView, render_screen, to_fb_bytes
+from estante_lib.render_spines import BOARD_COLOUR, BOARD_H, BOARD_Y, COVER, FACE_W, USABLE_H
 from estante_lib.theme import DARK, PAPER
 
 
@@ -22,11 +23,16 @@ def test_composition_size_divider_and_halves(now_view, shelf_view):
         assert img.getpixel((629, 540)) == theme.bg and img.getpixel((631, 540)) == theme.bg
         assert img.getpixel((1919, 5)) == theme.bg and img.getpixel((5, 5)) == theme.bg
     # the cover sits in the column; the shelf starts at x 650: Overgeared faces out first on the
-    # top board (cover 138 px, bottom 8 px above the board at y 110 + 206), the board under it
+    # top board (its COVER px cover centred in FACE_W, bottom 8 px above the board's top edge
+    # at BOARD_Y[0] + USABLE_H), and the board itself runs under the whole shelf
     img = render_screen(ScreenView(now_view, shelf_view, DARK))
     assert img.getpixel((300, 350)) != DARK.bg
-    assert img.getpixel((650 + 6 + 69, 110 + 206 - 8 - 69)) != DARK.bg
-    assert img.getpixel((650 + 600, 110 + 206 + 8)) != DARK.bg
+    board_top = BOARD_Y[0] + USABLE_H
+    cover_centre = (650 + (FACE_W - COVER) // 2 + COVER // 2, board_top - 8 - COVER // 2)
+    assert img.getpixel(cover_centre) != DARK.bg
+    assert img.getpixel((650 + 600, board_top + BOARD_H // 2)) == BOARD_COLOUR
+    # above the cover there is only background
+    assert img.getpixel((cover_centre[0], board_top - 8 - COVER - 6)) == DARK.bg
 
 
 def test_dim_halves_the_mean(now_view, shelf_view):

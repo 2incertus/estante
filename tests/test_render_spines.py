@@ -766,3 +766,60 @@ def test_one_line_spines_keep_the_surname_room_and_two_line_spines_do_not():
     assert (whole.size, whole.lines, whole.author, whole.room) == (26, ("The Name of the Wind",), False, 254)
     top = draw_spine(Piece(_book("w", "The Name of the Wind", "Patrick Rothfuss"), "spine", 50, 270), (40, 60, 120), DARK)
     assert _ink_rows(top.crop((0, 4, 50, 20))) is None  # no surname above the title
+
+
+def _room_for(text):
+    """The smallest room in which the label shows `text` whole."""
+    return next(r for r in range(1, 1000) if render_spines._fit_label(text, r) == text)
+
+
+def test_a_series_label_drops_its_count_before_it_is_cut():
+    run = Run("series:the wheel of time", "THE WHEEL OF TIME · 14 of 15", "series", [_book("w")])
+    room = _room_for("THE WHEEL OF TIME")
+    assert room < _room_for(run.label)
+    assert render_spines._label_text(run, room) == "THE WHEEL OF TIME"
+    assert render_spines._label_text(run, _room_for(run.label)) == run.label
+    # too small even for the name: the name, cut by the label fitting
+    small = render_spines._label_text(run, room - 10)
+    assert render_spines._fit_label(small, room - 10).endswith(ELLIPSIS)
+    assert small == "THE WHEEL OF TIME"
+
+
+def test_an_author_label_falls_back_to_the_surname():
+    book = _book("g", "Outliers", "Malcolm Gladwell")
+    run = Run("author:malcolm gladwell", "MALCOLM GLADWELL", "author", [book])
+    room = _room_for("GLADWELL")
+    assert render_spines._label_text(run, room) == "GLADWELL"
+    assert render_spines._label_text(run, _room_for(run.label)) == "MALCOLM GLADWELL"
+    tiny = render_spines._label_text(run, room - 8)
+    assert tiny == "MALCOLM GLADWELL" and render_spines._fit_label(tiny, room - 8).endswith(ELLIPSIS)
+
+
+def test_an_author_label_with_several_authors_keeps_every_surname():
+    book = _book("a", "Attached", "Amir Levine, MD, Rachel Heller, MA")
+    run = Run("author:amir levine, md, rachel heller, ma", "AMIR LEVINE, MD, RACHEL HELLER, MA", "author", [book])
+    assert render_spines._label_text(run, _room_for("LEVINE, HELLER")) == "LEVINE, HELLER"
+
+
+def test_labels_on_the_board_use_the_fallback(library):
+    _, runs, _, _ = library
+    seen = []
+    real = render_spines._draw_label
+
+    def spy(canvas, x, y, text, room):
+        seen.append((text, room))
+        return real(canvas, x, y, text, room)
+
+    render_spines._draw_label = spy
+    try:
+        for section in range(3):
+            render_section(_section_view(library, section=section), DARK)
+    finally:
+        render_spines._draw_label = real
+    labels = {run.label for run in runs}
+    # some run on these shelves shows a shorter label than its own (a surname, or no count)
+    assert any(text not in labels for text, _ in seen)
+    # a label that is still cut never carries a count it could have dropped
+    for text, room in seen:
+        if render_spines._fit_label(text, max(0, round(room))) != text:
+            assert " · " not in text, text

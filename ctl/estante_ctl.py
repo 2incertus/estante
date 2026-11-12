@@ -70,7 +70,7 @@ DEFAULTS = {
     "fb_file": "",
     "fb_size": [1920, 1080],
     "fb_bpp": 16,
-    "cover_width": 160,
+    "cover_width": 200,
     "now_cover_width": 520,
     "shelf_minutes": 2,
 }
