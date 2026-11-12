@@ -4,8 +4,9 @@
 Runs with whatever Pillow the interpreter has (on the Pi: /opt/estante/.venv/bin/python).
 Serves tests/fixtures through the local fake Audiobookshelf on 127.0.0.1, renders the
 1920x1080 composition as estante-ctl does (Now listening beside the audiobooks wall, a
-message badge on), once on the dark theme and once on paper dimmed to half, converts each
-frame to 16 bpp framebuffer bytes and times both steps. Warns when a frame takes longer
+message badge on), once on the dark theme and once on paper dimmed to half, turns each
+frame 180 degrees as the installed config does and converts it to 16 bpp framebuffer
+bytes, and times the whole path. Warns when a frame takes longer
 than the budget (3 s, the 3B+ target). When the framebuffer's sysfs directory exists it
 reads its geometry: a depth Estante cannot write fails, a size other than 1920x1080 warns
 (the HDMI mode is not forced until the reboot after the install). Never writes to the
@@ -33,6 +34,8 @@ COVER_WIDTH = 120
 NOW_COVER_WIDTH = 520
 DEFAULT_SYSFS = "/sys/class/graphics/fb0"
 FB_DEPTHS = (16, 32)
+# the installer's default: the K3 stands upside down, so every frame is turned
+ROTATE = 180
 
 
 def screen_views(fixtures):
@@ -86,7 +89,7 @@ def check(name, img):
 
 
 def render_and_time(fixtures):
-    """[(name, seconds)] for each frame: the composition plus its 16 bpp framebuffer bytes."""
+    """[(name, seconds)] for each frame: the composition, the 180 degree turn and the 16 bpp bytes."""
     from estante_lib.display_fb import FbInfo
     from estante_lib.render_screen import render_screen, to_fb_bytes
 
@@ -95,12 +98,17 @@ def render_and_time(fixtures):
     for name, view in screen_views(fixtures):
         start = time.perf_counter()
         img = render_screen(view, SIZE)
-        pixels = to_fb_bytes(img, info)
+        composed = time.perf_counter()
+        turned = img.rotate(ROTATE)
+        pixels = to_fb_bytes(turned, info)
         seconds = time.perf_counter() - start
         check(name, img)
         if len(pixels) != info.stride * info.height:
             raise AssertionError(f"{name}: {len(pixels)} framebuffer bytes, expected {info.stride * info.height}")
-        print(f"render {name}: {seconds:.2f} s")
+        print(
+            f"render {name}: compose {composed - start:.2f} s, rotate {ROTATE} and convert "
+            f"{seconds - (composed - start):.2f} s, total {seconds:.2f} s"
+        )
         timings.append((name, seconds))
     return timings
 

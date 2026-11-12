@@ -74,7 +74,7 @@ In this order:
 
 Flags: `--abs-token-file PATH` (else `ESTANTE_ABS_TOKEN`, else the existing config's token, else the prompt), `--abs-url` (default: the existing config's, else `http://192.168.68.86:13378`, the N100 on the LAN), `--rotate 180|0` (default: the existing config's, else 180 with a reminder printed), `--library-id` (default: the existing config's, else looked up), `--cmdline-file` (another kernel command line, for tests), `--dry-run`, and `--abs-token TOKEN` for dry runs only. A flag value starting with `--` counts as missing, so `--abs-token --dry-run` stops instead of starting a real run.
 
-The self-test renders the composition from the recorded fixtures through a local fake Audiobookshelf, times each frame (the budget on the 3B+ is 3 seconds; it warns above), and reads the framebuffer's geometry from sysfs: a depth other than 16 or 32 bpp fails, a size other than 1920x1080 warns that the forced mode only applies after the reboot. It never writes to the screen and ends with `selftest: ok`.
+The self-test renders the composition from the recorded fixtures through a local fake Audiobookshelf, times each frame through the same path as the service, the 180 degree turn and the framebuffer conversion included (the budget on the 3B+ is 3 seconds; it warns above), and reads the framebuffer's geometry from sysfs: a depth other than 16 or 32 bpp fails, a size other than 1920x1080 warns that the forced mode only applies after the reboot. It never writes to the screen and ends with `selftest: ok`.
 
 Logs: `journalctl -u estante-ctl -f`.
 

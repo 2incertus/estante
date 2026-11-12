@@ -97,3 +97,24 @@ def test_check_rejects_wrong_mode_and_size():
     with pytest.raises(AssertionError, match="size"):
         selftest.check("small", Image.new("RGB", (800, 480)))
     selftest.check("ok", Image.new("RGB", (1920, 1080)))
+
+
+def test_the_timed_path_includes_the_180_degree_rotate(monkeypatch, capsys):
+    # the installed config rotates every frame, so the budget has to cover the rotate too
+    from PIL import Image
+
+    selftest = _module()
+    angles = []
+    real = Image.Image.rotate
+
+    def rotate(self, angle, *args, **kwargs):
+        angles.append(angle)
+        return real(self, angle, *args, **kwargs)
+
+    monkeypatch.setattr(Image.Image, "rotate", rotate)
+    timings = selftest.render_and_time(str(REPO / "tests" / "fixtures"))
+    assert angles == [180, 180]
+    out = capsys.readouterr().out
+    lines = [line for line in out.splitlines() if line.startswith("render ")]
+    assert len(lines) == 2 and all("rotate 180" in line and line.endswith(" s") for line in lines)
+    assert [name for name, _ in timings] == ["dark", "paper dimmed"]
