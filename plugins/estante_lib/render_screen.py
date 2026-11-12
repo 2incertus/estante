@@ -1,10 +1,11 @@
 """The 1920x1080 composition: Now listening on the left, the cover wall on the right."""
 from dataclasses import dataclass
 
-from PIL import Image, ImageChops, ImageDraw, ImageEnhance
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageOps
 
 from .render_now import NowListeningView, render_now_column
 from .render_wall import WallView, render_wall
+from .text import SANS, font
 from .theme import Theme
 
 BASE_W, BASE_H = 1920, 1080
@@ -40,6 +41,35 @@ def render_screen(view, size=(BASE_W, BASE_H)):
     if dim < 1.0:
         canvas = ImageEnhance.Brightness(canvas).enhance(dim)
     return canvas
+
+
+MARK = "ESTANTE"
+
+
+def render_mark(theme, size=(BASE_W, BASE_H)):
+    """The boot frame: the theme background with ESTANTE (Inter 40, weight 700) in the centre."""
+    w, h = size
+    s = min(w / BASE_W, h / BASE_H)
+    canvas = Image.new("RGB", (w, h), theme.bg)
+    draw = ImageDraw.Draw(canvas)
+    draw.text((w // 2, h // 2), MARK, font=font(SANS, max(1, round(40 * s)), 700), fill=theme.mark, anchor="mm")
+    return canvas
+
+
+def load_image(path, square=None):
+    """An RGB copy of the image at `path` (a cached cover), or None when it cannot be read.
+
+    With `square`, centre-cropped to a square of that side, as a wall tile crops it anyway,
+    so a whole library of covers held in memory stays small.
+    """
+    try:
+        with Image.open(path) as img:
+            rgb = img.convert("RGB")
+    except (OSError, ValueError, Image.DecompressionBombError):
+        return None
+    if square:
+        rgb = ImageOps.fit(rgb, (square, square), Image.Resampling.LANCZOS)
+    return rgb
 
 
 _HI_R = [v & 0xF8 for v in range(256)]
