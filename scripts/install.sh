@@ -1,46 +1,50 @@
 #!/bin/bash
-# Install Estante into an existing InkyPi on the Raspberry Pi. Run as root from the
-# Estante checkout (normally /opt/estante), after InkyPi's own installer and reboot:
+# Install Estante on the Raspberry Pi that drives the HDMI screen. Run as root from the
+# Estante checkout (normally /opt/estante):
 #
-#   sudo scripts/install.sh --abs-url http://192.168.68.86:13378 --abs-token TOKEN
+#   sudo scripts/install.sh --abs-token TOKEN [--abs-url URL] [--rotate 180|0]
 #
 # Every step is idempotent and says what it did, so running it again is safe.
+# --dry-run prints what it would do and changes nothing (no root needed); it still
+# looks the library up in Audiobookshelf, which is a GET.
 #
-# --dev-http-only runs only the HTTP steps (InkyPi settings and the three playlist
-# instances) against a dev InkyPi (scripts/dev-inkypi.sh run), with INKYPI_URL set,
-# the dev checkout as --inkypi and no root, symlinks or systemd.
+# It never touches Docker or Ouvido's container, ports or GPIO.
 set -e
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-INKYPI_URL="${INKYPI_URL:-http://127.0.0.1}"
-WAIT_SECONDS="${ESTANTE_WAIT_SECONDS:-60}"
-PLAYLIST="Default"
-AUDIOBOOKS_NAME="Audiobooks"
-NOVELS_NAME="Light Novels"
-PLUGINS="estante_lib now_listening the_shelf"
+VENV="$REPO/.venv"
+CONFIG_DIR="/etc/estante"
+CONFIG_FILE="$CONFIG_DIR/estante.json"
+STATE_DIR="/var/lib/estante"
+UNIT_FILE="/etc/systemd/system/estante-ctl.service"
 CTL_URL="http://127.0.0.1:8360"
+WAIT_SECONDS="${ESTANTE_WAIT_SECONDS:-60}"
+LIBRARY_NAME="Audiobooks"
+PACKAGES=(python3-venv libopenjp2-7 libjpeg62-turbo curl)
+CMDLINE_PARAMS=("video=HDMI-A-1:1920x1080@60D" "vt.global_cursor_default=0" "consoleblank=0")
 
-ABS_URL=""
+ABS_URL="http://192.168.68.86:13378"
 ABS_TOKEN=""
-INKYPI=""
-DEV_HTTP_ONLY=""
-AUDIOBOOKS_ID=""
-NOVELS_ID=""
+ROTATE="180"
+ROTATE_GIVEN=""
+LIBRARY_ID=""
+CMDLINE_FILE="/boot/firmware/cmdline.txt"
+DRY_RUN=""
+CMDLINE_CHANGED="no"
 
 usage() {
     cat <<EOF
-usage: sudo scripts/install.sh --abs-url URL --abs-token TOKEN [--inkypi DIR]
-       scripts/install.sh --dev-http-only [--inkypi DIR] [--abs-url URL --abs-token TOKEN]
-                          [--audiobooks-id ID] [--novels-id ID]
+usage: sudo scripts/install.sh --abs-token TOKEN [--abs-url URL] [--rotate 180|0]
+                               [--library-id ID] [--cmdline-file PATH] [--dry-run]
 
-  --abs-url URL        Audiobookshelf base URL, e.g. http://192.168.68.86:13378
-  --abs-token TOKEN    Audiobookshelf API token (read-only use)
-  --inkypi DIR         InkyPi install dir (default /usr/local/inkypi; .inkypi with --dev-http-only)
-  --dev-http-only      only save InkyPi settings and add the playlist instances, over HTTP
-  --audiobooks-id ID   skip the Audiobookshelf lookup of the "$AUDIOBOOKS_NAME" library
-  --novels-id ID       skip the Audiobookshelf lookup of the "$NOVELS_NAME" library
+  --abs-token TOKEN    Audiobookshelf API token (written to $CONFIG_FILE, mode 600, never echoed)
+  --abs-url URL        Audiobookshelf base URL (default $ABS_URL)
+  --rotate 180|0       180 when the monitor stands upside down (default 180)
+  --library-id ID      skip the Audiobookshelf lookup of the "$LIBRARY_NAME" library
+  --cmdline-file PATH  kernel command line to edit (default $CMDLINE_FILE)
+  --dry-run            print what would be done, change nothing
 
-Environment: INKYPI_URL (default http://127.0.0.1), ESTANTE_WAIT_SECONDS (default 60).
+Environment: ESTANTE_WAIT_SECONDS (default 60), how long to wait for estante-ctl.
 EOF
 }
 
@@ -54,50 +58,156 @@ step() {
     echo "== $1"
 }
 
-# Add KEY=VALUE to an env file unless KEY already has a value; an empty KEY= line
-# is dropped and written again with the value.
-ensure_env_key() {
-    local file="$1"
-    local key="$2"
-    local value="$3"
-    if grep -q "^$key=[^[:space:]]" "$file"; then
-        echo "$key already set, left as is"
-        return 0
+# Echo a command, then run it unless this is a dry run. Never pass the token here.
+run() {
+    if [ -n "$DRY_RUN" ]; then
+        echo "would run: $*"
+    else
+        echo "+ $*"
+        "$@"
     fi
-    if grep -q "^$key=" "$file"; then
-        sed -i "/^$key=[[:space:]]*\$/d" "$file"
-    fi
-    # A hand-edited .env may lack its final newline; do not glue onto its last line.
-    if [ -n "$(tail -c 1 "$file")" ]; then
-        echo >> "$file"
-    fi
-    echo "$key=$value" >> "$file"
-    echo "$key added"
 }
 
-# The fields of InkyPi's settings form, one name=value per line: what device.json holds
-# now, the plugin cycle at 24 hours, and the four image enhancements at a neutral 1.0
-# (any other value blends the image before the driver sees it, so flat areas dither).
-settings_fields() {
-    local device_json="$1"
-    local tz="$2"
-    jq -r --arg tz "$tz" '
-        (.image_settings // {}) as $img
-        | ["deviceName=\(.name // "InkyPi")",
-           "orientation=\(.orientation // "horizontal")",
-           "timezoneName=\(.timezone // $tz)",
-           "timeFormat=\(.time_format // "12h")",
-           "unit=hour",
-           "interval=24",
-           "saturation=1.0",
-           "contrast=1.0",
-           "sharpness=1.0",
-           "brightness=1.0"]
-        + (if .inverted_image then ["invertImage=on"] else [] end)
-        + (if .log_system_stats then ["logSystemStats=on"] else [] end)
-        + (if (.display_type // "inky") == "inky"
-           then ["inky_saturation=\($img.inky_saturation // 0.5)"] else [] end)
-        | .[]' "$device_json"
+package_installed() {
+    dpkg-query -W -f='${Status}' "$1" 2> /dev/null | grep -q "ok installed"
+}
+
+pillow_ok() {
+    [ -x "$VENV/bin/python" ] && "$VENV/bin/python" -c \
+        'import sys, PIL; sys.exit(0 if int(PIL.__version__.split(".")[0]) >= 11 else 1)' 2> /dev/null
+}
+
+# GET /api/libraries. The token goes to curl on stdin as a config line, so it never
+# shows in the process list.
+abs_libraries() {
+    local token="${ABS_TOKEN//\\/\\\\}"
+    token="${token//\"/\\\"}"
+    printf 'header = "Authorization: Bearer %s"\n' "$token" \
+        | curl -sf --max-time 15 -K - "$ABS_URL/api/libraries"
+}
+
+# stdin: the /api/libraries JSON. Prints the id of the library named $1 (case and
+# surrounding spaces ignored), or explains on stderr and fails.
+find_library_id() {
+    local program
+    program="$(cat <<'PY'
+import json
+import sys
+
+name, url = sys.argv[1], sys.argv[2]
+libraries = json.load(sys.stdin).get("libraries") or []
+ids = [lib.get("id") for lib in libraries if (lib.get("name") or "").strip().lower() == name.lower()]
+if not ids or not ids[0]:
+    known = ", ".join(f"{lib.get('name')} ({lib.get('id')})" for lib in libraries) or "none"
+    sys.exit(f'install: no library named "{name}" at {url}; libraries: {known}')
+print(ids[0])
+PY
+)"
+    python3 -c "$program" "$1" "$2"
+}
+
+# The config estante-ctl reads, on stdout: the example, then an existing config over it,
+# then abs_url, abs_token (from $ESTANTE_ABS_TOKEN) and rotate from the flags. The
+# audiobooks wall gets the library id when it has none; other walls are kept.
+# Args: example existing abs_url library_id rotate
+render_config() {
+    python3 - "$@" <<'PY'
+import json
+import os
+import sys
+
+example, existing, url, library_id, rotate = sys.argv[1:6]
+with open(example, encoding="utf-8") as f:
+    cfg = json.load(f)
+try:
+    with open(existing, encoding="utf-8") as f:
+        old = json.load(f)
+except FileNotFoundError:
+    old = {}
+except (OSError, ValueError) as e:
+    sys.exit(f"install: cannot read {existing}: {e}")
+if not isinstance(old, dict):
+    sys.exit(f"install: {existing} is not a JSON object")
+cfg.update(old)
+cfg["abs_url"] = url
+cfg["abs_token"] = os.environ["ESTANTE_ABS_TOKEN"]
+cfg["rotate"] = int(rotate)
+walls = cfg.get("walls") or []
+if not walls:
+    walls = [{"name": "audiobooks", "library_id": "", "title": "The shelf"}]
+for wall in walls:
+    if wall.get("name") == "audiobooks" and not wall.get("library_id"):
+        wall["library_id"] = library_id
+cfg["walls"] = walls
+json.dump(cfg, sys.stdout, indent=2)
+print()
+PY
+}
+
+# Make the kernel command line in $1 carry CMDLINE_PARAMS: a parameter with the same key
+# (video=HDMI-A-1:, consoleblank=, ...) is replaced in place, a missing one appended. The
+# first edit keeps the original as $1.estante-bak. Sets CMDLINE_CHANGED to yes or no.
+ensure_cmdline() {
+    local file="$1"
+    local line=""
+    local new want key found i
+    local -a words
+    CMDLINE_CHANGED="no"
+    IFS= read -r line < "$file" || true
+    read -ra words <<< "$line"
+    for want in "${CMDLINE_PARAMS[@]}"; do
+        case "$want" in
+            video=*) key="${want%%:*}:" ;;
+            *) key="${want%%=*}=" ;;
+        esac
+        found=""
+        for i in "${!words[@]}"; do
+            case "${words[$i]}" in
+                "$key"*)
+                    words[i]="$want"
+                    found="yes"
+                    ;;
+            esac
+        done
+        if [ -z "$found" ]; then
+            words+=("$want")
+        fi
+    done
+    new="${words[*]}"
+    if [ "$new" = "$line" ]; then
+        echo "$file already has: ${CMDLINE_PARAMS[*]}"
+        return 0
+    fi
+    CMDLINE_CHANGED="yes"
+    if [ -n "$DRY_RUN" ]; then
+        echo "would back up $file to $file.estante-bak and write:"
+        echo "$new"
+        return 0
+    fi
+    if [ ! -e "$file.estante-bak" ]; then
+        cp -p "$file" "$file.estante-bak"
+        echo "backed up $file to $file.estante-bak"
+    fi
+    printf '%s\n' "$new" > "$file.estante-tmp"
+    mv -f "$file.estante-tmp" "$file"
+    echo "wrote $file:"
+    echo "$new"
+}
+
+# The service unit with /opt/estante replaced by the checkout at $1.
+unit_for() {
+    sed "s#/opt/estante#$1#g" "$REPO/ctl/estante-ctl.service"
+}
+
+wait_for_state() {
+    local deadline=$((SECONDS + WAIT_SECONDS))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$CTL_URL/state" || true)" = "200" ]; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
 }
 
 # tests load the helpers above without running the installer
@@ -107,7 +217,7 @@ fi
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --abs-url|--abs-token|--inkypi|--audiobooks-id|--novels-id)
+        --abs-url|--abs-token|--rotate|--library-id|--cmdline-file)
             if [ "$#" -lt 2 ]; then
                 echo "install: $1 needs a value" >&2
                 usage >&2
@@ -118,206 +228,173 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --abs-url) ABS_URL="${2%/}"; shift 2 ;;
         --abs-token) ABS_TOKEN="$2"; shift 2 ;;
-        --inkypi) INKYPI="${2%/}"; shift 2 ;;
-        --dev-http-only) DEV_HTTP_ONLY="yes"; shift ;;
-        --audiobooks-id) AUDIOBOOKS_ID="$2"; shift 2 ;;
-        --novels-id) NOVELS_ID="$2"; shift 2 ;;
+        --rotate) ROTATE="$2"; ROTATE_GIVEN="yes"; shift 2 ;;
+        --library-id) LIBRARY_ID="$2"; shift 2 ;;
+        --cmdline-file) CMDLINE_FILE="$2"; shift 2 ;;
+        --dry-run) DRY_RUN="yes"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) usage >&2; exit 2 ;;
     esac
 done
 
-need_abs=""
-if [ -z "$DEV_HTTP_ONLY" ] || [ -z "$AUDIOBOOKS_ID" ] || [ -z "$NOVELS_ID" ]; then
-    need_abs="yes"
-fi
-if [ -n "$need_abs" ] && { [ -z "$ABS_URL" ] || [ -z "$ABS_TOKEN" ]; }; then
-    echo "install: --abs-url and --abs-token are both required" >&2
+if [ -z "$ABS_TOKEN" ]; then
+    echo "install: --abs-token is required" >&2
     usage >&2
     exit 2
 fi
-
-if [ -n "$DEV_HTTP_ONLY" ]; then
-    INKYPI="${INKYPI:-$REPO/.inkypi}"
-    DEVICE_JSON="$INKYPI/src/config/device_dev.json"
-else
-    INKYPI="${INKYPI:-/usr/local/inkypi}"
-    DEVICE_JSON="$INKYPI/src/config/device.json"
-    [ "$(id -u)" -eq 0 ] || die "run as root: sudo scripts/install.sh ..."
+if [ "$ROTATE" != "180" ] && [ "$ROTATE" != "0" ]; then
+    echo "install: --rotate must be 180 or 0, not \"$ROTATE\"" >&2
+    exit 2
+fi
+if [ -z "$DRY_RUN" ] && [ "$(id -u)" -ne 0 ]; then
+    die "run as root: sudo scripts/install.sh ..."
 fi
 
-for tool in curl jq; do
-    command -v "$tool" > /dev/null || die "$tool is missing: sudo apt install $tool"
+if [ -n "$DRY_RUN" ]; then
+    echo "dry run: nothing will be changed"
+fi
+echo "checkout: $REPO"
+echo "Audiobookshelf: $ABS_URL"
+if [ -n "$ROTATE_GIVEN" ]; then
+    echo "rotate $ROTATE"
+else
+    echo "rotate 180 (the default: the monitor stands upside down; pass --rotate 0 if it stands upright)"
+fi
+
+# ---- 1. system packages
+step "1. system packages: ${PACKAGES[*]}"
+missing=()
+for pkg in "${PACKAGES[@]}"; do
+    if package_installed "$pkg"; then
+        echo "$pkg already installed"
+    else
+        missing+=("$pkg")
+    fi
 done
+if [ "${#missing[@]}" -gt 0 ]; then
+    run apt-get install -y "${missing[@]}"
+fi
 
-wait_for() {
-    local url="$1"
-    local deadline=$((SECONDS + WAIT_SECONDS))
-    while [ "$SECONDS" -lt "$deadline" ]; do
-        if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$url" || true)" = "200" ]; then
-            return 0
-        fi
-        sleep 2
-    done
-    return 1
-}
+# ---- 2. the venv and Pillow (a binary wheel, never compiled on the Pi)
+step "2. Python venv at $VENV with pillow>=11"
+if [ -x "$VENV/bin/python" ]; then
+    echo "$VENV exists"
+else
+    run python3 -m venv "$VENV"
+fi
+if pillow_ok; then
+    echo "Pillow $("$VENV/bin/python" -c 'import PIL; print(PIL.__version__)') already in the venv"
+else
+    run env PIP_ONLY_BINARY=:all: "$VENV/bin/pip" install --disable-pip-version-check "pillow>=11"
+fi
 
-# ---- 1. InkyPi must be installed first
-if [ -z "$DEV_HTTP_ONLY" ]; then
-    step "1. InkyPi at $INKYPI"
-    if [ ! -d "$INKYPI/src/plugins" ]; then
-        cat >&2 <<EOF
-install: $INKYPI/src/plugins is missing, so InkyPi is not installed yet.
-Install it first, then reboot and run this script again:
-    git clone https://github.com/fatihak/InkyPi.git ~/InkyPi
-    cd ~/InkyPi && sudo bash install/install.sh
-    sudo reboot
-EOF
+# ---- 3. the config, with the Audiobooks library id from Audiobookshelf
+step "3. $CONFIG_FILE"
+if [ -n "$LIBRARY_ID" ]; then
+    echo "library id $LIBRARY_ID (from --library-id)"
+else
+    libraries="$(abs_libraries)" \
+        || die "could not list the libraries at $ABS_URL/api/libraries (wrong address or token?)"
+    LIBRARY_ID="$(printf '%s' "$libraries" | find_library_id "$LIBRARY_NAME" "$ABS_URL")" || exit 1
+    echo "library \"$LIBRARY_NAME\" is $LIBRARY_ID"
+fi
+if [ -n "$DRY_RUN" ]; then
+    echo "would write $CONFIG_FILE (mode 600, token hidden here):"
+    echo "BEGIN estante.json"
+    ESTANTE_ABS_TOKEN="(hidden)" render_config \
+        "$REPO/ctl/estante.example.json" "$CONFIG_FILE" "$ABS_URL" "$LIBRARY_ID" "$ROTATE"
+    echo "END estante.json"
+else
+    mkdir -p "$CONFIG_DIR"
+    tmp="$(mktemp "$CONFIG_DIR/.estante.json.XXXXXX")"
+    chmod 600 "$tmp"
+    if ! ESTANTE_ABS_TOKEN="$ABS_TOKEN" render_config \
+        "$REPO/ctl/estante.example.json" "$CONFIG_FILE" "$ABS_URL" "$LIBRARY_ID" "$ROTATE" > "$tmp"; then
+        rm -f "$tmp"
         exit 1
     fi
-    echo "found $INKYPI/src/plugins"
-
-    # ---- 2. plugin symlinks
-    step "2. link the plugins into InkyPi"
-    for name in $PLUGINS; do
-        ln -sfn "$REPO/plugins/$name" "$INKYPI/src/plugins/$name"
-        echo "$INKYPI/src/plugins/$name -> $REPO/plugins/$name"
-    done
-
-    # ---- 3. credentials in InkyPi's .env
-    # InkyPi runs src/inkypi.py through its real path, so its .env (the API Keys page)
-    # lives next to the real src directory, not under the /usr/local/inkypi symlink.
-    ENV_FILE="$(dirname "$(realpath "$INKYPI/src")")/.env"
-    step "3. Audiobookshelf credentials in $ENV_FILE"
-    touch "$ENV_FILE"
-    chmod 600 "$ENV_FILE"
-    ensure_env_key "$ENV_FILE" ABS_URL "$ABS_URL"
-    ensure_env_key "$ENV_FILE" ABS_TOKEN "$ABS_TOKEN"
-
-    # ---- 4. state dir and estante.json
-    step "4. /var/lib/estante and /etc/estante/estante.json"
-    mkdir -p /var/lib/estante/covers /etc/estante
-    if [ -f /etc/estante/estante.json ]; then
-        echo "/etc/estante/estante.json exists, left as is"
+    if [ -f "$CONFIG_FILE" ] && cmp -s "$tmp" "$CONFIG_FILE"; then
+        rm -f "$tmp"
+        echo "$CONFIG_FILE already up to date"
     else
-        jq --arg env "$ENV_FILE" --arg dev "$DEVICE_JSON" \
-            '.inkypi_env = $env | .inkypi_device_json = $dev' \
-            "$REPO/ctl/estante.example.json" > /etc/estante/estante.json
-        echo "wrote /etc/estante/estante.json (inkypi_env $ENV_FILE)"
+        existed="$([ -f "$CONFIG_FILE" ] && echo "updated" || echo "wrote")"
+        mv -f "$tmp" "$CONFIG_FILE"
+        echo "$existed $CONFIG_FILE (abs_url, abs_token, rotate, audiobooks wall)"
     fi
-
-    # ---- 5. restart InkyPi so it loads the plugins
-    step "5. restart inkypi.service"
-    systemctl restart inkypi.service
-    wait_for "$INKYPI_URL/" || die "InkyPi did not answer at $INKYPI_URL/ within ${WAIT_SECONDS}s"
-    echo "InkyPi is up at $INKYPI_URL/"
-else
-    wait_for "$INKYPI_URL/" || die "InkyPi did not answer at $INKYPI_URL/ within ${WAIT_SECONDS}s"
-    echo "dev InkyPi at $INKYPI_URL/ (config $DEVICE_JSON)"
+    chmod 600 "$CONFIG_FILE"
+    echo "mode 600"
 fi
 
-[ -f "$DEVICE_JSON" ] || die "$DEVICE_JSON is missing"
+# ---- 4. state dir and cover cache
+step "4. $STATE_DIR/covers"
+if [ -d "$STATE_DIR/covers" ]; then
+    echo "$STATE_DIR/covers exists"
+else
+    run mkdir -p "$STATE_DIR/covers"
+fi
 
-# ---- 6. park InkyPi's own playlist cycle at its maximum, 24 hours
-step "6. InkyPi plugin cycle interval: 24 hours"
-# The settings form posts every field, so send back what is configured now and change
-# only the interval and the image enhancements. estante-ctl's display calls reset
-# InkyPi's timer, so this cycle only fires if estante-ctl is not running.
-system_tz="$(timedatectl show -p Timezone --value 2> /dev/null || true)"
-settings_args=()
-while IFS= read -r field; do
-    settings_args+=(--data-urlencode "$field")
-done < <(settings_fields "$DEVICE_JSON" "${system_tz:-UTC}")
-reply="$(curl -s --max-time 30 -X POST "$INKYPI_URL/save_settings" "${settings_args[@]}")"
-echo "$reply" | jq -e '.success == true' > /dev/null || die "save_settings failed: $reply"
-echo "saved (plugin_cycle_interval_seconds 86400)"
-echo "image saturation, contrast, sharpness and brightness set to 1.0 so flat areas do not dither"
+# ---- 5. the kernel command line: forced HDMI mode, no cursor, no console blanking
+step "5. $CMDLINE_FILE: ${CMDLINE_PARAMS[*]}"
+if [ -f "$CMDLINE_FILE" ]; then
+    ensure_cmdline "$CMDLINE_FILE"
+elif [ -n "$DRY_RUN" ]; then
+    echo "$CMDLINE_FILE not found here; on the Pi it would gain: ${CMDLINE_PARAMS[*]}"
+    CMDLINE_CHANGED="yes"
+else
+    die "$CMDLINE_FILE not found: is this the Pi? (--cmdline-file PATH to point elsewhere)"
+fi
 
-# ---- 7. the three playlist instances
-step "7. playlist \"$PLAYLIST\": Now listening, The shelf, Light novels"
+# ---- 6. no login console drawing over the framebuffer
+step "6. getty on tty1 off"
+getty_enabled="$(systemctl is-enabled getty@tty1.service 2> /dev/null || true)"
+getty_active="$(systemctl is-active getty@tty1.service 2> /dev/null || true)"
+echo "getty@tty1: ${getty_enabled:-unknown}, ${getty_active:-unknown}"
+if [ -n "$DRY_RUN" ] || [ "$getty_enabled" = "enabled" ] || [ "$getty_active" = "active" ]; then
+    run systemctl disable --now getty@tty1.service
+else
+    echo "already disabled and stopped"
+fi
 
-library_id() {
-    local name="$1"
-    local libraries
-    local id
-    libraries="$(curl -sf --max-time 15 -H "Authorization: Bearer $ABS_TOKEN" "$ABS_URL/api/libraries")" \
-        || die "could not list the libraries at $ABS_URL"
-    id="$(echo "$libraries" | jq -r --arg name "$name" '.libraries[] | select(.name == $name) | .id' | head -n 1)"
-    [ -n "$id" ] || die "no library named \"$name\" at $ABS_URL"
-    echo "$id"
-}
+# ---- 7. the conductor service
+step "7. estante-ctl.service"
+unit="$(unit_for "$REPO")"
+if [ -f "$UNIT_FILE" ] && [ "$(cat "$UNIT_FILE")" = "$unit" ]; then
+    echo "$UNIT_FILE already up to date"
+elif [ -n "$DRY_RUN" ]; then
+    echo "would write $UNIT_FILE (ExecStart under $REPO)"
+else
+    printf '%s\n' "$unit" > "$UNIT_FILE"
+    echo "wrote $UNIT_FILE (ExecStart under $REPO)"
+fi
+run systemctl daemon-reload
+run systemctl enable estante-ctl.service
+run systemctl restart estante-ctl.service
+if [ -z "$DRY_RUN" ]; then
+    wait_for_state || die "estante-ctl did not answer at $CTL_URL/state within ${WAIT_SECONDS}s (journalctl -u estante-ctl)"
+    echo "estante-ctl answers at $CTL_URL/state"
+fi
 
-add_instance() {
-    local plugin_id="$1"
-    local name="$2"
-    shift 2
-    local refresh
-    refresh="$(jq -cn --arg playlist "$PLAYLIST" --arg name "$name" \
-        '{playlist: $playlist, instance_name: $name, refreshType: "interval", unit: "hour", interval: 1}')"
-    local reply
-    reply="$(curl -s --max-time 120 -X POST "$INKYPI_URL/add_plugin" \
-        --data-urlencode "plugin_id=$plugin_id" \
-        --data-urlencode "refresh_settings=$refresh" \
-        "$@")"
-    if echo "$reply" | jq -e '.success == true' > /dev/null 2>&1; then
-        echo "added \"$name\""
-    elif echo "$reply" | jq -e '(.error // "") | test("already exists")' > /dev/null 2>&1; then
-        echo "\"$name\" is already there, left as is"
+# ---- 8. reboot?
+step "8. reboot"
+if [ "$CMDLINE_CHANGED" = "yes" ]; then
+    if [ -n "$DRY_RUN" ]; then
+        echo "reboot needed after a real run: the kernel command line would change"
     else
-        die "adding \"$name\" failed: $reply"
+        echo "REBOOT NEEDED: the kernel command line changed; run: sudo reboot"
+        echo "(reboot needed for the 1920x1080 mode, the hidden cursor and no console blanking)"
     fi
-}
-
-instance_exists() {
-    jq -e --arg playlist "$PLAYLIST" --arg name "$1" \
-        '.playlist_config.playlists[]? | select(.name == $playlist) | .plugins[]? | select(.name == $name)' \
-        "$DEVICE_JSON" > /dev/null 2>&1
-}
-
-if instance_exists "Now listening"; then
-    echo "\"Now listening\" is already there, left as is"
 else
-    add_instance now_listening "Now listening"
-fi
-if instance_exists "The shelf"; then
-    echo "\"The shelf\" is already there, left as is"
-else
-    if [ -z "$AUDIOBOOKS_ID" ]; then
-        AUDIOBOOKS_ID="$(library_id "$AUDIOBOOKS_NAME")"
-    fi
-    add_instance the_shelf "The shelf" --data-urlencode "library_id=$AUDIOBOOKS_ID" \
-        --data-urlencode "layout=pages" --data-urlencode "title=The shelf"
-fi
-if instance_exists "Light novels"; then
-    echo "\"Light novels\" is already there, left as is"
-else
-    if [ -z "$NOVELS_ID" ]; then
-        NOVELS_ID="$(library_id "$NOVELS_NAME")"
-    fi
-    add_instance the_shelf "Light novels" --data-urlencode "library_id=$NOVELS_ID" \
-        --data-urlencode "layout=pages" --data-urlencode "title=Light novels"
+    echo "no reboot needed"
 fi
 
-if [ -n "$DEV_HTTP_ONLY" ]; then
-    echo
-    echo "dev HTTP steps done"
+# ---- 9. self-test and the conductor's state
+step "9. self-test and /state"
+if [ -n "$DRY_RUN" ]; then
+    echo "would run: $VENV/bin/python $REPO/scripts/selftest.py"
+    echo "would run: curl -s $CTL_URL/state"
     exit 0
 fi
-
-# ---- 8. the conductor service
-step "8. estante-ctl.service"
-sed "s#/opt/estante#$REPO#g" "$REPO/ctl/estante-ctl.service" > /etc/systemd/system/estante-ctl.service
-systemctl daemon-reload
-systemctl enable estante-ctl.service > /dev/null
-systemctl restart estante-ctl.service
-wait_for "$CTL_URL/state" || die "estante-ctl did not answer at $CTL_URL/state within ${WAIT_SECONDS}s"
-echo "estante-ctl is up: $(curl -s --max-time 5 "$CTL_URL/state")"
-
-# ---- 9. self-test with InkyPi's Pillow
-step "9. self-test"
-if INKYPI="$INKYPI" "$INKYPI/venv_inkypi/bin/python" "$REPO/scripts/selftest.py"; then
-    echo
-    echo "Estante is installed. Buttons arrive from Ouvido at $CTL_URL (swap, show, badge)."
-else
-    die "self-test failed (see above); the panel may show wrong colours"
-fi
+"$VENV/bin/python" "$REPO/scripts/selftest.py" || die "self-test failed (see above)"
+echo "state: $(curl -s --max-time 5 "$CTL_URL/state")"
+echo
+echo "Estante is installed. Ouvido and Home Assistant reach it at port 8360."
