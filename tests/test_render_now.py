@@ -78,7 +78,8 @@ def test_cover_contained_in_box(now_view):
 
 def test_title_and_rows_below_cover(now_view):
     img = render_now_column(now_view, DARK)
-    assert _count_near(img, (50, 615, 571, 660), DARK.ink) > 100  # title, first baseline 650
+    assert _count_near(img, (50, 633, 571, 678), DARK.ink) > 100  # title, first baseline 668
+    assert _count_not(img, (50, 611, 571, 628), DARK.bg) == 0  # clear air between cover and title
     assert _count_not(img, (50, 860, 571, 898), DARK.bg) == 0  # nothing touches the bar
 
 
@@ -130,24 +131,26 @@ def test_render_nothing_playing():
     assert img.size == (W, H) and img.mode == "RGB"
     assert _count_not(img, (50, 90, 570, 610), DARK.bg) == 0  # no cover
     assert _count_near(img, (50, 46, 330, 66), DARK.accent) > 30  # NOTHING PLAYING
-    assert _count_near(img, (50, 615, 571, 660), DARK.ink) > 30  # "Nothing played yet"
+    assert _count_near(img, (50, 633, 571, 678), DARK.ink) > 30  # "Nothing played yet"
     assert _count_not(img, (50, 895, 571, 925), DARK.bg) == 0  # no bar, no ticks
 
 
 def test_footer_default_and_no_mark(now_view):
     for theme in (DARK, PAPER):
         img = render_now_column(now_view, theme)
-        assert _count_near(img, (60, 1024, 560, 1025), theme.muted, 60) > 450  # rule
-        assert _count_near(img, (50, 1042, 300, 1062), theme.ink) > 20  # "7 finished in 2026"
-        assert _count_near(img, (50, 1040, 571, 1064), theme.accent) == 0
-        assert _count_near(img, (300, 1040, 620, 1064), theme.mark) == 0  # ESTANTE lives on the wall
+        # same baselines as the wall footer: rule at y 1044, text at y 1064
+        assert _count_near(img, (60, 1044, 560, 1045), theme.muted, 60) > 450  # rule
+        assert _count_not(img, (50, 1000, 571, 1040), theme.bg) == 0  # the old 1024 rule is gone
+        assert _count_near(img, (50, 1054, 300, 1074), theme.ink) > 20  # "7 finished in 2026"
+        assert _count_near(img, (50, 1052, 571, 1076), theme.accent) == 0
+        assert _count_near(img, (300, 1052, 620, 1076), theme.mark) == 0  # ESTANTE lives on the wall
 
 
 def test_badge_draws_message_in_accent(now_view):
     badge = {"message_waiting": True, "dnd": True, "count": 1, "from": "Jasmine"}
     img = render_now_column(dataclasses.replace(now_view, badge=badge), DARK)
-    assert _count_near(img, (50, 1040, 571, 1064), DARK.accent) > 30
-    assert _count_not(img, (50, 1040, 571, 1064), DARK.bg) > 100
+    assert _count_near(img, (50, 1052, 571, 1076), DARK.accent) > 30
+    assert _count_not(img, (50, 1052, 571, 1076), DARK.bg) > 100
 
 
 def test_scaled_column(now_view):

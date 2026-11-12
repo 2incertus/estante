@@ -61,6 +61,14 @@ def test_read_info(tmp_path):
     assert read_info(str(_sysfs(tmp_path))) == DEFAULT
 
 
+def test_read_info_without_a_framebuffer_names_the_directory(tmp_path):
+    missing = tmp_path / "fb0"
+    with pytest.raises(FileNotFoundError) as err:
+        read_info(str(missing))
+    message = str(err.value)
+    assert str(missing) in message and "no framebuffer" in message
+
+
 def test_read_info_32_bpp(tmp_path):
     d = _sysfs(tmp_path, bpp="32", stride="7680")
     assert read_info(str(d)) == FbInfo(1920, 1080, 32, 7680)

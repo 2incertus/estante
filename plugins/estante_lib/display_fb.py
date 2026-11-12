@@ -37,6 +37,8 @@ def _read(sysfs_dir, name):
 
 def read_info(sysfs_dir=DEFAULT_SYSFS):
     """Geometry from sysfs: virtual_size "W,H", bits_per_pixel, stride (computed when absent)."""
+    if not os.path.isdir(sysfs_dir):
+        raise FileNotFoundError(f"no framebuffer at {sysfs_dir}: is HDMI connected or the mode forced?")
     width, height = (int(v) for v in _read(sysfs_dir, "virtual_size").split(","))
     bpp = int(_read(sysfs_dir, "bits_per_pixel"))
     try:

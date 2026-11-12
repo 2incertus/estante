@@ -1,6 +1,6 @@
 import dataclasses
 
-from PIL import Image, ImageStat
+from PIL import Image, ImageOps, ImageStat
 
 from estante_lib.model import STATUS_LISTENING, STATUS_READ, STATUS_UNREAD, ShelfBook, shelf_counts
 from estante_lib.render_wall import WallView, grid_for, render_wall
@@ -76,7 +76,17 @@ def test_listening_tile_has_frame_after_all_tiles(wall_view):
     assert img.getpixel((x + 20, y + TILE + 1)) == DARK.frame
 
 
-def test_unread_tile_darker_than_read_with_the_same_cover(wall_view):
+def _dist(a, b):
+    return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+
+def _ghost(colour, theme):
+    """A solid colour after the unread treatment: greyscale, then 70% toward the background."""
+    grey = Image.new("RGB", (1, 1), colour).convert("L").convert("RGB")
+    return Image.blend(grey, Image.new("RGB", (1, 1), theme.bg), 0.70).getpixel((0, 0))
+
+
+def test_unread_tile_sits_closer_to_the_background_than_read(wall_view):
     cover = next(iter(wall_view.covers.values()))
     books = _books([STATUS_READ, STATUS_UNREAD])
     covers = {"0": cover, "1": cover}
@@ -86,30 +96,32 @@ def test_unread_tile_darker_than_read_with_the_same_cover(wall_view):
         tile = cell - 3
         x0 = (W - (cols * cell - 3)) // 2
 
-        def mean(i):
-            box = (x0 + i * cell, Y0, x0 + i * cell + tile, Y0 + tile)
-            return ImageStat.Stat(img.crop(box).convert("L")).mean[0]
+        def crop(i):
+            return img.crop((x0 + i * cell, Y0, x0 + i * cell + tile, Y0 + tile))
 
-        if theme is DARK:
-            assert mean(1) < mean(0)
-        unread = img.crop((x0 + cell, Y0, x0 + cell + tile, Y0 + tile))
-        # greyscale blended toward the near-grey paper tile: channels stay within a few levels
-        r, g, b = (ImageStat.Stat(unread).mean[k] for k in range(3))
-        assert abs(r - g) < 4 and abs(g - b) < 6
+        read_mean = ImageStat.Stat(crop(0)).mean
+        unread_mean = ImageStat.Stat(crop(1)).mean
+        assert _dist(unread_mean, theme.bg) < _dist(read_mean, theme.bg), theme.name
+        # the read tile is the cover itself, full colour, untouched
+        expected = ImageOps.fit(cover.convert("RGB"), (tile, tile), Image.Resampling.LANCZOS)
+        assert crop(0).tobytes() == expected.tobytes()
+        # the unread tile is grey under the background tint: take out the 70% of bg and
+        # the remaining cover part has equal channels
+        r, g, b = ((m - 0.7 * c) / 0.3 for m, c in zip(unread_mean, theme.bg))
+        assert abs(r - g) < 4 and abs(g - b) < 4
 
 
-def test_unread_tile_is_ghost_on_dark_fixtures(wall_view):
-    img = render_wall(wall_view, DARK)
+def test_unread_tiles_are_ghosts_on_both_themes(wall_view):
     unread = [i for i, b in enumerate(wall_view.books[:12]) if b.status == STATUS_UNREAD]
     assert unread
-    # brightest possible ghost on dark: 255 x 0.35 blended halfway toward (40, 40, 44)
-    ceiling = (255 * 0.35 + 44) / 2
-    for i in unread:
-        x, y = _tile_xy(i)
-        crop = img.crop((x, y, x + TILE, y + TILE))
-        assert max(hi for lo, hi in crop.getextrema()) <= ceiling + 1, i
-        r, g, b = ImageStat.Stat(crop).mean
-        assert abs(r - g) < 3 and abs(g - b) < 3, i
+    for theme in (DARK, PAPER):
+        img = render_wall(wall_view, theme)
+        # 70% of every pixel is the background: each channel stays in bg * 0.7 + [0, 255 * 0.3]
+        for i in unread:
+            x, y = _tile_xy(i)
+            crop = img.crop((x, y, x + TILE, y + TILE))
+            for (lo, hi), c in zip(crop.getextrema(), theme.bg):
+                assert lo >= c * 0.7 - 1 and hi <= c * 0.7 + 255 * 0.3 + 1, (theme.name, i)
 
 
 def test_missing_cover_tiles(wall_view):
@@ -120,11 +132,12 @@ def test_missing_cover_tiles(wall_view):
         tile = cell - 3
         x0 = (W - (cols * cell - 3)) // 2
         mid = tile // 2
-        assert img.getpixel((x0 + mid, Y0 + mid)) == theme.paper_tile  # read, no cover
-        assert img.getpixel((x0 + 2 * cell + mid, Y0 + mid)) == theme.paper_tile  # listening
+        read = img.getpixel((x0 + mid, Y0 + mid))
         ghost = img.getpixel((x0 + cell + mid, Y0 + mid))
-        assert ghost != theme.paper_tile
-        assert abs(ghost[0] - ghost[1]) <= 3 and abs(ghost[1] - ghost[2]) <= 6
+        assert read == theme.paper_tile  # read, no cover
+        assert img.getpixel((x0 + 2 * cell + mid, Y0 + mid)) == theme.paper_tile  # listening
+        assert ghost == _ghost(theme.paper_tile, theme)
+        assert _dist(ghost, theme.bg) < _dist(read, theme.bg)
 
 
 def test_header_and_footer(wall_view):

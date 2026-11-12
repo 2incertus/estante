@@ -2,7 +2,7 @@
 import math
 from dataclasses import dataclass
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 
 from .model import STATUS_LISTENING, STATUS_READ, STATUS_UNREAD, ShelfBook
 from .render_common import draw_footer
@@ -14,8 +14,8 @@ GRID_TOP, GRID_H = 110, 920
 FOOTER_RULE_Y, FOOTER_TEXT_Y = 1044, 1064
 TILE_GAP = 3
 FRAME = 3
-UNREAD_BRIGHTNESS = {"dark": 0.35, "paper": 0.55}
-UNREAD_BLEND = 0.5
+# Unread recedes into the page on both themes: greyscale, then 70% of the way to the background.
+UNREAD_TOWARD_BG = 0.70
 
 
 @dataclass
@@ -41,10 +41,9 @@ def grid_for(n, area, gap=TILE_GAP):
 
 
 def _unread(art, theme):
-    """An unread book: greyscale, dimmed, blended halfway toward the theme's paper tile."""
-    grey = art.convert("L")
-    grey = ImageEnhance.Brightness(grey).enhance(UNREAD_BRIGHTNESS.get(theme.name, 0.55))
-    return Image.blend(grey.convert("RGB"), Image.new("RGB", art.size, theme.paper_tile), UNREAD_BLEND)
+    """An unread book: greyscale, blended 70% toward the background so it sits behind the read ones."""
+    grey = art.convert("L").convert("RGB")
+    return Image.blend(grey, Image.new("RGB", art.size, theme.bg), UNREAD_TOWARD_BG)
 
 
 def _tile(cover, tile, status, theme, blanks):
