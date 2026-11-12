@@ -29,12 +29,16 @@ from .spine_text import (  # noqa: F401  (re-exported: tests and callers import 
     TITLE_ROOM,
     TITLE_SIZE,
     TITLE_SIZE_SMALL,
+    TITLE_SIZE_TINY,
+    TWO_LINE_W,
     SpineLayout,
     _approx_width,
     _fast_ellipsize,
     _fits,
     _ink_extent,
     _title_font,
+    line_pitch,
+    shelf_title,
     spine_layout,
 )
 from .text import ELLIPSIS, SANS, SERIF, ellipsize, font, text_width
@@ -129,7 +133,8 @@ def spine_width(hours):
 def piece_for(book, hours):
     if book.status == STATUS_UNREAD:
         height = spine_height(book.item_id)
-        layout = spine_layout(book.title, spine_width(hours.get(book.item_id)), height)
+        title = shelf_title(book.title, book.author, book.series)
+        layout = spine_layout(title, spine_width(hours.get(book.item_id)), height)
         return Piece(book, KIND_SPINE, layout.width, height)
     return Piece(book, KIND_FACE, FACE_W, USABLE_H)
 
@@ -362,7 +367,8 @@ def _shade(rgb, delta):
 
 
 def _layout_of(piece):
-    return spine_layout(piece.book.title, piece.width, piece.height)
+    book = piece.book
+    return spine_layout(shelf_title(book.title, book.author, book.series), piece.width, piece.height)
 
 
 def spine_title(piece):
@@ -385,8 +391,8 @@ def clear_caches():
 
 def draw_spine(piece, colour, theme):
     """A spine of `piece`'s size: paper edge on top, shaded right edge, the title bottom to top
-    (two lines when spine_layout says so), and on a one-line title the author's surname at the
-    top when the spine is AUTHOR_MIN_W or wider and the whole surname fits beside the title."""
+    as spine_layout sets it, and the author's surname at the top when the layout leaves it
+    room, the spine is AUTHOR_MIN_W or wider and the whole surname fits beside the title."""
     key = (piece, tuple(colour), theme.name)
     cached = _SPINES.get(key)
     if cached is not None:
@@ -403,15 +409,16 @@ def draw_spine(piece, colour, theme):
     sd = ImageDraw.Draw(strip)
     layout = _layout_of(piece)
     title_font = _title_font(layout.size)
-    # centre the ink, not the font's line box: Garamond's descender is deeper than its caps are
-    # tall; two lines are centred as one block, the first line on the spine's left
+    # centre the ink across the spine, not the font's line box: Garamond's descender is deeper
+    # than its caps are tall; two lines are centred as one block, the first on the spine's left.
+    # Along the spine the title starts TITLE_PAD from the bottom and stays inside layout.room.
     top, bottom = _ink_extent(title_font)
-    pitch = LINE_W if len(layout.lines) > 1 else 0
+    pitch = line_pitch(layout.size) if len(layout.lines) > 1 else 0
     baseline = round(w / 2 - (top + bottom + pitch) / 2)
     for n, line in enumerate(layout.lines):
-        sd.text((TITLE_PAD, baseline + n * LINE_W), line, font=title_font, fill=ink, anchor="ls")
+        sd.text((TITLE_PAD, baseline + n * pitch), line, font=title_font, fill=ink, anchor="ls")
     author = surname(piece.book.author)
-    if author and w >= AUTHOR_MIN_W and len(layout.lines) == 1:
+    if author and layout.author and w >= AUTHOR_MIN_W:
         title = layout.lines[0]
         author_font = font(SANS, AUTHOR_SIZE, 500)
         room = h - AUTHOR_PAD - (TITLE_PAD + text_width(title_font, title)) - AUTHOR_GAP

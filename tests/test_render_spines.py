@@ -40,6 +40,7 @@ from estante_lib.render_spines import (
     render_section,
     section_of,
     spine_colour,
+    shelf_title,
     spine_layout,
     spine_title,
 )
@@ -233,10 +234,10 @@ def _board_width(board, gap=2, run_gap=14):
     return x
 
 
-def test_fixture_packs_into_seven_to_ten_sections_without_overflow(library):
+def test_fixture_packs_into_seven_to_twelve_sections_without_overflow(library):
     books, runs, hours, _ = library
     sections = plan_sections(runs, hours)
-    assert 7 <= len(sections) <= 10
+    assert 7 <= len(sections) <= 12
     assert all(1 <= len(section) <= 3 for section in sections)
     for section in sections:
         for board in section:
@@ -388,12 +389,13 @@ def test_a_narrow_spine_starts_at_26():
 
 
 def test_a_long_title_wraps_to_two_lines_and_widens_the_spine():
-    # about 269 px at 26: two lines, each inside the 200 px room, cut between words
+    # about 269 px at 26, over the whole 254 px spine: two lines, cut between words
     layout = spine_layout("The Lies of Locke Lamora", 40, 270)
     assert layout.size == 26 and len(layout.lines) == 2
     assert " ".join(layout.lines) == "The Lies of Locke Lamora"
-    assert all(text_width(font(SERIF, 26, 500), line) <= 270 - TITLE_ROOM for line in layout.lines)
+    assert all(text_width(font(SERIF, 26, 500), line) <= 270 - 2 * TITLE_PAD for line in layout.lines)
     assert layout.width == _two_line_width()
+    assert (layout.author, layout.room) == (False, 270 - 2 * TITLE_PAD)
     # a long book already wider than two lines keeps its width
     assert spine_layout("The Lies of Locke Lamora", 90, 270).width == 90
 
@@ -401,11 +403,13 @@ def test_a_long_title_wraps_to_two_lines_and_widens_the_spine():
 def test_a_very_long_title_ends_with_the_ellipsis_on_line_two():
     title = "The Hitchhiker's Guide to the Galaxy and Everything After It, the Complete Edition"
     layout = spine_layout(title, 40, 270)
-    assert layout.size == 26 and len(layout.lines) == 2
+    # no separator to drop a subtitle at: two lines at 22, the last one cut
+    assert layout.size == 22 and len(layout.lines) == 2
     first, second = layout.lines
     assert not first.endswith(ELLIPSIS) and title.startswith(first + " ")
     assert second.endswith(ELLIPSIS)
-    assert all(text_width(font(SERIF, 26, 500), line) <= 200 for line in layout.lines)
+    assert all(text_width(font(SERIF, 22, 500), line) <= 254 for line in layout.lines)
+    assert layout.width == _two_line_width() and not layout.author
 
 
 def test_a_word_longer_than_the_room_is_cut():
@@ -434,7 +438,7 @@ def test_two_line_spine_draws_both_lines_inside_and_no_author():
     x0, y0, x1, y1 = _ink_box(img)
     # nothing touches the long edges or the spine's ends
     assert x0 >= 2 and x1 <= w - 4
-    assert y0 >= TITLE_ROOM - 10 and y1 <= 270 - 4
+    assert y0 >= 4 and y1 <= 270 - 4
     # two lines: ink in both halves of the width
     left = _ink_box(img.crop((0, 0, w // 2, 270)))
     right = _ink_box(img.crop((w // 2, 0, w, 270)))
@@ -451,10 +455,19 @@ def test_long_title_is_wrapped_and_ellipsized_inside_the_spine():
     x0, y0, x1, y1 = _ink_box(img)
     w, h = piece.width, piece.height
     assert x0 >= 2 and x1 <= w - 4
-    assert y0 >= 50 and y1 <= h - 4
+    assert y0 >= 4 and y1 <= h - 4
 
 
-@pytest.mark.parametrize("title", ["Dune", "Children of Time", "The Lies of Locke Lamora", "Wwwwwwwwwwwwwwwwwwwww"])
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Dune",
+        "Children of Time",
+        "The Lies of Locke Lamora",
+        "Wwwwwwwwwwwwwwwwwwwww",
+        "Lord of the Mysteries (Web Novel) Novel Chapters | Light Novel Pub - Part 2",
+    ],
+)
 @pytest.mark.parametrize("hours", [0, 8, 40])
 def test_type_never_leaves_the_spine(title, hours):
     piece = piece_for(_book(f"{title}-{hours}", title, "Ursula K. Le Guin"), {f"{title}-{hours}": hours})
@@ -502,7 +515,7 @@ def test_render_section_size_header_and_footer(library):
         assert img.size == (W, 1080) and img.mode == "RGB"
         assert img.getpixel((W - 1, 1075)) == theme.bg
     n = info["sections"]
-    assert info["section"] == 0 and 7 <= n <= 10
+    assert info["section"] == 0 and 7 <= n <= 12
     assert info["subtitle"] == f"Audiobooks, by series and author  ·  shelf 1 of {n}"
     assert info["first_author"] == "Saenal"
     assert info["footer"] == (
@@ -637,14 +650,119 @@ def test_fast_ellipsize_matches_ellipsize_on_the_fixture_titles(library):
             assert _fast_ellipsize(title, fnt, room) == ellipsize(title, fnt, room), (title, room)
 
 
-def test_every_fixture_spine_line_fits_its_room(library):
-    books, _, hours, _ = library
-    fnts = {26: font(SERIF, 26, 500), 30: font(SERIF, 30, 500)}
+@pytest.mark.parametrize("room", [230, 245])
+def test_fast_ellipsize_matches_ellipsize_where_kerning_fools_the_estimate(room):
+    # the advances add up to about 271 px; kerned, the real width is about 241
+    from estante_lib.render_spines import _fast_ellipsize
+    from estante_lib.text import ellipsize
+
+    fnt = font(SERIF, 26, 500)
+    title = "AVAWAYATo Wa Ta Yo"
+    assert _fast_ellipsize(title, fnt, room) == ellipsize(title, fnt, room)
+    if room == 245:
+        assert _fast_ellipsize(title, fnt, room) == title
+
+
+def _fixture_layouts(books, hours):
     for book in books:
         if book.status != STATUS_UNREAD:
             continue
         piece = piece_for(book, hours)
-        layout = spine_layout(book.title, piece.width, piece.height)
+        title = shelf_title(book.title, book.author, book.series)
+        yield book, piece, spine_layout(title, piece.width, piece.height)
+
+
+def test_every_fixture_spine_line_fits_its_room(library):
+    books, _, hours, _ = library
+    fnts = {size: font(SERIF, size, 500) for size in (22, 26, 30)}
+    for book, piece, layout in _fixture_layouts(books, hours):
         assert layout.width == piece.width
+        assert layout.room in (piece.height - TITLE_ROOM, piece.height - 2 * TITLE_PAD)
         for line in layout.lines:
-            assert text_width(fnts[layout.size], line) <= piece.height - TITLE_ROOM, (book.title, line)
+            assert text_width(fnts[layout.size], line) <= layout.room, (book.title, line)
+
+
+def test_at_most_six_fixture_spines_end_with_the_ellipsis(library):
+    books, _, hours, _ = library
+    cut = [book.title for book, _, layout in _fixture_layouts(books, hours) if layout.lines[-1].endswith(ELLIPSIS)]
+    # 57 did before titles were cleaned and two-line titles had the whole spine
+    assert len(cut) <= 6, cut
+
+
+@pytest.mark.parametrize(
+    "title, author, series, cleaned",
+    [
+        ("The Burning God (The Poppy War, Book 3)", "R. F. Kuang", "The Poppy War #3", "The Burning God"),
+        (
+            "Dom Casmurro by Joaquim Maria Machado de Assis (1839 - 1908)",
+            "Joaquim Maria Machado de Assis",
+            "",
+            "Dom Casmurro",
+        ),
+        ("Alienista, O", "Machado de Assis", "", "O Alienista"),
+        ("Count of Monte Cristo, The", "Alexandre Dumas", "", "The Count of Monte Cristo"),
+        ("1491 (Unabridged)", "Charles C. Mann", "", "1491"),
+        ("Blood over Bright Haven [Unabridged]", "M. L. Wang", "", "Blood over Bright Haven"),
+        ("Red Rising (Full-Cast Edition)", "Pierce Brown", "", "Red Rising"),
+        ("Golden Son (Part 1 of 2) (Dramatized Adaptation)", "Pierce Brown", "Red Rising #2", "Golden Son (Part 1 of 2)"),
+        ("Dune (Abridged)  ", "Frank Herbert", "", "Dune"),
+        ("Warbreaker (Vol. 2)", "Brandon Sanderson", "", "Warbreaker"),
+        ("Oathbringer (Stormlight Archive Volume 3)", "Brandon Sanderson", "", "Oathbringer"),
+        ("Skyward (Skyward Saga)", "Brandon Sanderson", "Skyward #1", "Skyward"),
+        ("NEKOMONOGATARI: Cat Tale (White)", "NISIOISIN", "Monogatari #6", "NEKOMONOGATARI: Cat Tale (White)"),
+        ("Le Morte d'Arthur (Selected Tales)", "Thomas Malory", "", "Le Morte d'Arthur (Selected Tales)"),
+        ("Walden by Henry David Thoreau", "Someone Else", "", "Walden by Henry David Thoreau"),
+        ("  Team   of Rivals ", "Doris Kearns Goodwin", "", "Team of Rivals"),
+    ],
+)
+def test_shelf_title_cleans_scraped_titles(title, author, series, cleaned):
+    assert shelf_title(title, author, series) == cleaned
+
+
+def test_a_subtitle_is_dropped_before_anything_is_cut():
+    layout = spine_layout("The Shock Doctrine: The Rise of Disaster Capitalism", 40, 248)
+    assert not any(line.endswith(ELLIPSIS) for line in layout.lines)
+    assert " ".join(layout.lines) == "The Shock Doctrine"
+    dashed = spine_layout("Scattered Minds - The Origins and Healing of Attention Deficit Disorder", 40, 248)
+    assert " ".join(dashed.lines) == "Scattered Minds"
+
+
+def test_a_title_without_a_separator_still_ends_with_the_ellipsis():
+    title = "A very long title that keeps going and going with no place at all to stop it early on"
+    layout = spine_layout(title, 40, 248)
+    assert layout.lines[-1].endswith(ELLIPSIS) and len(layout.lines) == 2
+
+
+def test_a_hyphenated_word_fits_one_line_on_the_whole_spine():
+    layout = spine_layout("Slaughterhouse-Five", 40, 258)
+    assert layout.lines == ("Slaughterhouse-Five",) and layout.width == 40
+    assert layout.author is False and layout.room == 258 - 2 * TITLE_PAD
+
+
+def test_a_word_longer_than_the_spine_breaks_at_its_hyphen():
+    word = "Supercalifragilistic-Expialidociousness"
+    assert text_width(font(SERIF, 26, 500), word) > 248 - 2 * TITLE_PAD
+    layout = spine_layout(word, 40, 248)
+    assert layout.lines == ("Supercalifragilistic-", "Expialidociousness")
+    assert layout.width == _two_line_width() and layout.size == 26
+
+
+@pytest.mark.parametrize("sep", [" -", ":", ",", ";", " |"])
+def test_line_one_never_ends_with_a_separator(sep):
+    from estante_lib.spine_text import _two_lines
+
+    fnt = font(SERIF, 26, 500)
+    # line 1 has room for the separator; the greedy fill would leave it dangling there
+    room = max(text_width(fnt, f"Alpha Beta{sep}"), text_width(fnt, "Gamma Delta")) + 2
+    assert text_width(fnt, f"Alpha Beta{sep} Gamma") > room
+    lines, cut = _two_lines(f"Alpha Beta{sep} Gamma Delta", fnt, room)
+    assert lines == ("Alpha Beta", "Gamma Delta") and not cut
+
+
+def test_one_line_spines_keep_the_surname_room_and_two_line_spines_do_not():
+    one = spine_layout("Dune", 50, 270)
+    assert (one.author, one.room) == (True, 270 - TITLE_ROOM)
+    whole = spine_layout("The Name of the Wind", 50, 270)  # 240 px at 26: over 200, under 254
+    assert (whole.size, whole.lines, whole.author, whole.room) == (26, ("The Name of the Wind",), False, 254)
+    top = draw_spine(Piece(_book("w", "The Name of the Wind", "Patrick Rothfuss"), "spine", 50, 270), (40, 60, 120), DARK)
+    assert _ink_rows(top.crop((0, 4, 50, 20))) is None  # no surname above the title

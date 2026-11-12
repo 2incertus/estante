@@ -411,7 +411,7 @@ def test_framebuffer_smaller_than_canvas(make_conductor):
 def test_swap_turns_to_the_next_shelf_and_resets_the_timer(http, conductor):
     before = rendered(conductor)
     shelf = http.get("/state").body["shelf"]
-    assert shelf["section"] == 1 and 7 <= shelf["sections"] <= 10
+    assert shelf["section"] == 1 and 7 <= shelf["sections"] <= 12
     count = render_count(conductor)
     deadline = conductor._turn_at
     time.sleep(0.5)
