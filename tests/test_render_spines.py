@@ -823,3 +823,28 @@ def test_labels_on_the_board_use_the_fallback(library):
     for text, room in seen:
         if render_spines._fit_label(text, max(0, round(room))) != text:
             assert " · " not in text, text
+
+
+def test_credentials_are_never_taken_for_a_surname():
+    # the fixture's author for "What Every Therapist Ought to Know"
+    book = _book("t", "What Every Therapist Ought to Know", "Stan Tatkin PsyD MFT")
+    run = Run("author:stan tatkin psyd mft", "STAN TATKIN PSYD MFT", "author", [book])
+    assert render_spines._surnames(book.author) == "Tatkin"
+    assert render_spines._label_text(run, _room_for("TATKIN")) == "TATKIN"
+    assert render_spines._surnames("Jane Roe, LCSW, John Doe Jr., M.D.") == "Roe, Doe"
+    assert render_spines._surnames("Ann Lee, Ph.D., Bo Kim III") == "Lee, Kim"
+
+
+def test_authors_joined_by_and_or_ampersand_each_give_a_surname():
+    assert render_spines._surnames("Stan Tatkin and Tracey Boldemann-Tatkin").upper() == "TATKIN, BOLDEMANN-TATKIN"
+    assert render_spines._surnames("Ann Lee & Bo Kim") == "Lee, Kim"
+
+
+def test_many_authors_fall_back_to_the_first_surname_not_a_cut_first_name():
+    # the fixture's author for "In Each Other's Care"
+    author = "Andrew Pike, Dagny Chika, Jeff Mack, Mitchell Clute, Sahar Al-Nima, Sarah Stanton, Stan Tatkin"
+    book = _book("c", "In Each Other's Care", author)
+    run = Run(f"author:{author.lower()}", author.upper(), "author", [book])
+    assert render_spines._surnames(author) == "Pike, Chika, Mack, Clute, Al-Nima, Stanton, Tatkin"
+    assert render_spines._label_text(run, _room_for("PIKE ET AL.")) == "PIKE ET AL."
+    assert render_spines._label_text(run, _room_for("PIKE")) == "PIKE"

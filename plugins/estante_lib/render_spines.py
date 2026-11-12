@@ -13,6 +13,7 @@ import functools
 import hashlib
 import json
 import os
+import re
 import tempfile
 from dataclasses import dataclass, field
 
@@ -509,33 +510,40 @@ def _label_mask(text, room):
     return mask
 
 
-_HONORIFICS = {"md", "ma", "phd", "jr", "sr"}
+# credentials and name suffixes that are never a surname (compared without dots)
+_CREDENTIALS = {
+    "md", "ma", "phd", "psyd", "mft", "lmft", "lcsw", "msw", "rn", "do", "esq", "dds", "mba",
+    "cpa", "jr", "sr", "ii", "iii",
+}
+_AUTHOR_SPLIT_RE = re.compile(r"\s*,\s*|\s+and\s+|\s*&\s*", re.I)
 
 
 def _surnames(author):
-    """Every author's surname, comma-split as model.surname splits them, honorifics (MD, MA,
-    PhD, Jr., Sr.) skipped: "Amir Levine, MD, Rachel Heller, MA" -> "Levine, Heller"."""
+    """Every author's surname, credentials and suffixes (MD, PhD, PsyD, MFT, LCSW, Jr., III and
+    the like) left out, authors split on commas, " and " and " & ":
+    "Amir Levine, MD, Rachel Heller, MA" -> "Levine, Heller"."""
     names = []
-    for part in (author or "").split(","):
-        words = part.split()
-        if not words or (len(words) == 1 and words[0].lower().strip(".") in _HONORIFICS):
-            continue
-        while len(words) > 1 and words[-1].lower().strip(".") in _HONORIFICS:
-            words.pop()
-        names.append(words[-1])
+    for part in _AUTHOR_SPLIT_RE.split(author or ""):
+        words = [w for w in part.split() if w.lower().replace(".", "") not in _CREDENTIALS]
+        if words:
+            names.append(words[-1])
     return ", ".join(names)
 
 
 def _label_text(run, room):
-    """The run's label, or a shorter one that fits `room` whole: a series drops its count, an
-    author run keeps the surnames. When nothing fits, the series name or the full author name,
-    which _fit_label then ellipsizes."""
+    """The run's label, or a shorter one that fits `room` whole: a series drops its count; an
+    author run keeps every surname, then the first surname with "ET AL." when there are
+    several, then the first surname alone. When nothing fits, the series name or the full
+    author name, which _fit_label then ellipsizes."""
     room = max(0, round(room))
     if run.kind == RUN_SERIES:
         candidates = [run.label, run.label.split(" · ")[0]]
     else:
         author = run.books[0].author if run.books else ""
-        candidates = [run.label, _surnames(author).upper()]
+        names = _surnames(author).upper().split(", ")
+        candidates = [run.label, ", ".join(names)]
+        if len(names) > 1:
+            candidates += [f"{names[0]} ET AL.", names[0]]
     for text in candidates:
         if text and _fit_label(text, room) == text:
             return text
