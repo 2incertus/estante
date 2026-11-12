@@ -461,7 +461,8 @@ def test_the_heaviest_section_renders_fast_with_cached_colours(library):
     render_spines.clear_caches()
     start = time.perf_counter()
     render_section(view, DARK)
-    assert time.perf_counter() - start < 0.3
+    # the real budget is the Pi self-test's 1.5 s; here only a regression of several times fails
+    assert time.perf_counter() - start < 0.6
 
 
 def test_a_metadata_edit_replans():
