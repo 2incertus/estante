@@ -610,8 +610,11 @@ def test_poll_failure_keeps_last_frame(conductor, fake_abs, caplog):
     assert conductor.is_alive()
     assert render_count(conductor) == count
     assert frame(conductor) == shown
-    failures = [r for r in caplog.records if "Audiobookshelf" in r.getMessage()]
-    assert len(failures) == 1
+    failures = [r.getMessage() for r in caplog.records if "Audiobookshelf" in r.getMessage()]
+    # once per distinct error: a poll already past its first read when the 500s start fails
+    # on a later path, so two distinct messages are possible, a repeat never is
+    assert 1 <= len(failures) <= 2 and len(set(failures)) == len(failures), failures
+    assert "/api/me/items-in-progress" in failures[-1]
     fake_abs.fail_with = None
     renders_after(conductor, count)
 
