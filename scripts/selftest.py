@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Render the Estante screens from the recorded fixtures and check them for the panel.
+"""Render the Estante screen from the recorded fixtures and check it.
 
-Runs with whatever Pillow the interpreter has (InkyPi's venv on the Pi, .venv on the
-ryzen). Serves tests/fixtures through the local fake Audiobookshelf, renders Now
-listening, a page of the shelf and the light-novel mosaic, and checks each is 800x480,
-uses only ink indexes 0..5 and passes through the inky driver's quantize unchanged.
-Never touches the panel or the network beyond 127.0.0.1. Prints `selftest: ok` and
-exits 0, or prints the first failure and exits 1. Also warns (without failing) when
+Runs with whatever Pillow the interpreter has. Serves tests/fixtures through the local
+fake Audiobookshelf, renders the 1920x1080 composition (Now listening beside the
+audiobooks wall, then beside the light-novel wall) and checks each is a 1920x1080 RGB
+frame. Never touches the screen or the network beyond 127.0.0.1. Prints `selftest: ok`
+and exits 0, or prints the first failure and exits 1. Also warns (without failing) when
 InkyPi's device.json ($INKYPI/src/config/device.json, INKYPI defaults to
-/usr/local/inkypi) holds an image enhancement other than 1.0.
+/usr/local/inkypi) holds an image enhancement other than 1.0 (a v1 leftover until the
+installer is rewritten).
 
 Usage:
     python3 scripts/selftest.py [--fixtures DIR]
@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.join(REPO, "tests"))
 
 AUDIOBOOKS_ID = "b14de8f5-99a5-4cba-b970-6a2cb65f2993"
 LIGHT_NOVELS_ID = "65bcd45d-1cce-496c-950e-4f3aabf5f5eb"
-SIZE = (800, 480)
+SIZE = (1920, 1080)
 NEUTRAL_IMAGE_SETTINGS = ("saturation", "contrast", "sharpness", "brightness")
 
 
@@ -41,14 +41,21 @@ def _open(path):
 
 
 def render_screens(fixtures):
-    """Yield (name, P image) for each screen, rendered from the fixtures."""
+    """Yield (name, RGB image) for each composition, rendered from the fixtures."""
     from fake_abs import FakeAbs
 
     from estante_lib.abs import AbsClient, CoverCache
-    from estante_lib.model import build_shelf, finished_in_year, pick_now_listening, progress_index
-    from estante_lib.render_now import NowListeningView, render_now_listening
-    from estante_lib.render_shelf import ShelfView, page_books, render_shelf
-    from estante_lib.state import DEFAULT_BADGE
+    from estante_lib.model import (
+        build_shelf,
+        finished_in_year,
+        pick_now_listening,
+        progress_index,
+        shelf_counts,
+    )
+    from estante_lib.render_now import NowListeningView
+    from estante_lib.render_screen import ScreenView, render_screen
+    from estante_lib.render_wall import WallView
+    from estante_lib.theme import DARK
 
     if not os.path.isdir(fixtures):
         raise RuntimeError(f"no fixtures at {fixtures}")
@@ -61,36 +68,27 @@ def render_screens(fixtures):
         cover = _open(covers.path(nl.item_id, nl.updated_at, 400)) if nl else None
         year = datetime.now(timezone.utc).year
         finished = finished_in_year(client.me(), year, timezone.utc)
-        view = NowListeningView(nl, cover, finished, year, dict(DEFAULT_BADGE))
-        yield "now listening", render_now_listening(view, SIZE)
+        now = NowListeningView(nl, cover, finished, year, badge)
 
-        for name, library_id, layout, title, subtitle in (
-            ("the shelf", AUDIOBOOKS_ID, "pages", "The shelf", "Audiobooks, by author"),
-            ("light novels mosaic", LIGHT_NOVELS_ID, "mosaic", "Light novels", "Light Novels, by author"),
+        for name, library_id, title, subtitle in (
+            ("audiobooks screen", AUDIOBOOKS_ID, "Audiobooks", "Audiobooks, by author"),
+            ("light novels screen", LIGHT_NOVELS_ID, "Light novels", "Light Novels, by author"),
         ):
             books = build_shelf(client.library_items(library_id), progress_index(client.me()))
-            shown = books if layout == "mosaic" else page_books(books, 0)[0]
             loaded = {}
-            for book in shown:
+            for book in books:
                 img = _open(covers.path(book.item_id, book.updated_at, 80))
                 if img is not None:
                     loaded[book.item_id] = img
-            view = ShelfView(title, subtitle, books, loaded, layout=layout, badge=badge)
-            yield name, render_shelf(view, SIZE)
+            wall = WallView(title, subtitle, books, loaded, shelf_counts(books))
+            yield name, render_screen(ScreenView(now, wall, DARK), SIZE)
 
 
 def check(name, img):
-    from estante_lib.palette import driver_palette, inky_pass, to_rgb
-
     if img.size != SIZE:
         raise AssertionError(f"{name}: size {img.size}, expected {SIZE}")
-    if img.mode != "P":
-        raise AssertionError(f"{name}: mode {img.mode}, expected P")
-    if any(img.histogram()[6:]):
-        raise AssertionError(f"{name}: palette indexes outside 0..5")
-    passed = inky_pass(to_rgb(img, driver_palette(0.5)))
-    if passed.tobytes() != img.tobytes():
-        raise AssertionError(f"{name}: the inky driver pass would change pixels")
+    if img.mode != "RGB":
+        raise AssertionError(f"{name}: mode {img.mode}, expected RGB")
 
 
 def image_settings_warning(inkypi_dir):

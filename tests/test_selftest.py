@@ -1,4 +1,4 @@
-"""scripts/selftest.py renders the fixture screens and checks the driver pass is a no-op."""
+"""scripts/selftest.py renders the fixture compositions and checks their size and mode."""
 import json
 import os
 import subprocess
@@ -30,7 +30,7 @@ def test_selftest_reports_first_failure(tmp_path):
     assert last.startswith("selftest: FAILED") and "missing" in last
 
 
-def test_check_rejects_stray_indexes_and_wrong_size():
+def test_check_rejects_wrong_mode_and_size():
     import importlib.util
 
     import pytest
@@ -40,13 +40,12 @@ def test_check_rejects_stray_indexes_and_wrong_size():
     selftest = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(selftest)
 
-    stray = Image.new("P", (800, 480), 1)
-    stray.putpixel((5, 5), 7)
-    with pytest.raises(AssertionError, match="outside 0..5"):
-        selftest.check("stray", stray)
+    with pytest.raises(AssertionError, match="mode"):
+        selftest.check("palette", Image.new("P", (1920, 1080), 1))
 
     with pytest.raises(AssertionError, match="size"):
-        selftest.check("small", Image.new("P", (400, 240), 1))
+        selftest.check("small", Image.new("RGB", (800, 480)))
+    selftest.check("ok", Image.new("RGB", (1920, 1080)))
 
 
 def test_selftest_warns_on_non_neutral_image_settings(tmp_path):

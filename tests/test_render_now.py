@@ -1,129 +1,156 @@
 import dataclasses
 import math
 
-from estante_lib.palette import BLACK, BLUE, GREEN, RED, WHITE, driver_palette, inky_pass, to_rgb
-from estante_lib.render_now import NowListeningView, render_now_listening
+from estante_lib.render_now import NowListeningView, render_now_column
 from estante_lib.state import DEFAULT_BADGE
+from estante_lib.theme import DARK, PAPER
 
-BAR_X0, BAR_X1, BAR_Y = 470, 760, 300
+W, H = 620, 1080
+BAR_X0, BAR_X1, BAR_Y, BAR_H = 50, 570, 900, 14
+TEXT_BOX = (50, 615, 571, 890)
 
 
-def _count(img, box, index):
+def _near(px, colour, tol=24):
+    return all(abs(a - b) <= tol for a, b in zip(px, colour))
+
+
+def _count_near(img, box, colour, tol=24):
     x0, y0, x1, y1 = box
-    return sum(1 for x in range(x0, x1) for y in range(y0, y1) if img.getpixel((x, y)) == index)
+    return sum(1 for x in range(x0, x1) for y in range(y0, y1) if _near(img.getpixel((x, y)), colour, tol))
 
 
-def test_render_size_mode_and_palette_only(now_view):
-    img = render_now_listening(now_view)
-    assert img.size == (800, 480) and img.mode == "P"
-    assert max(img.tobytes()) <= 5
-    assert img.getpalette()[:18] == [v for c in driver_palette(0.5) for v in c]
+def _count_not(img, box, colour):
+    x0, y0, x1, y1 = box
+    return sum(1 for x in range(x0, x1) for y in range(y0, y1) if img.getpixel((x, y)) != colour)
 
 
-def test_inky_pass_noop_on_now_listening(now_view):
-    img = render_now_listening(now_view)
-    assert inky_pass(to_rgb(img, driver_palette(0.5))).tobytes() == img.tobytes()
+def test_column_size_mode_and_background(now_view):
+    for theme in (DARK, PAPER):
+        img = render_now_column(now_view, theme)
+        assert img.size == (W, H) and img.mode == "RGB"
+        assert img.getpixel((5, 5)) == theme.bg and img.getpixel((W - 5, H - 5)) == theme.bg
+
+
+def test_label_in_accent(now_view):
+    img = render_now_column(now_view, DARK)
+    assert _count_near(img, (50, 46, 300, 66), DARK.accent) > 30  # NOW LISTENING
 
 
 def test_progress_bar_filled_to_pct(now_view):
     # Overgeared progress: currentTime 28095.155 of duration 583287.581035 (fixtures).
     assert abs(now_view.nl.pct - 28095.155 / 583287.581035) < 1e-9
-    img = render_now_listening(now_view)
-    y = BAR_Y + 6
+    img = render_now_column(now_view, DARK)
+    y = BAR_Y + BAR_H // 2
     fx = BAR_X0 + max(4, int((BAR_X1 - BAR_X0) * now_view.nl.pct))
-    assert img.getpixel((BAR_X0 + 3, y)) == RED
-    assert img.getpixel((fx - 1, y)) == RED
-    assert img.getpixel((min(fx + 6, BAR_X1 - 3), y)) == WHITE
-    assert img.getpixel((BAR_X0 + 100, BAR_Y)) == BLACK  # outline top
-    assert img.getpixel((BAR_X1 - 1, y)) == BLACK  # outline right
+    assert img.getpixel((BAR_X0 + 3, y)) == DARK.accent
+    assert img.getpixel((fx - 1, y)) == DARK.accent
+    assert img.getpixel((min(fx + 6, BAR_X1 - 4), y)) == DARK.bg
+    assert img.getpixel((BAR_X0 + 100, BAR_Y)) == DARK.ink  # outline top
+    assert img.getpixel((BAR_X1 - 1, y)) == DARK.ink  # outline right
 
 
 def test_finished_bar_is_full(now_view):
     nl = dataclasses.replace(now_view.nl, finished=True, finished_at=1790000000000)
-    img = render_now_listening(dataclasses.replace(now_view, nl=nl))
-    row = [img.getpixel((x, BAR_Y + 6)) for x in range(BAR_X0 + 3, BAR_X1 - 3)]
-    assert row.count(RED) == len(row)
+    img = render_now_column(dataclasses.replace(now_view, nl=nl), DARK)
+    row = [img.getpixel((x, BAR_Y + 7)) for x in range(BAR_X0 + 3, BAR_X1 - 3)]
+    assert row.count(DARK.accent) == len(row)
+    assert _count_near(img, (50, 46, 300, 66), DARK.accent) > 30  # LAST LISTENED
 
 
 def test_tick_thinning_for_820_chapters(overgeared_view):
     assert overgeared_view.nl.chapter_count == 820
-    img = render_now_listening(overgeared_view)
-    ticks = sum(1 for x in range(470, 761) if img.getpixel((x, 318)) == BLACK)
+    img = render_now_column(overgeared_view, DARK)
+    tick_y = BAR_Y + BAR_H + 4
+    ticks = sum(1 for x in range(BAR_X0, BAR_X1 + 1) if img.getpixel((x, tick_y)) != DARK.bg)
     assert 40 <= ticks <= 96
     # every ceil(820 / 96) = 9th chapter: at most 91 ticks, none for chapter 0
     assert math.ceil(820 / 96) == 9
-    assert img.getpixel((470, 318)) == WHITE
+    assert img.getpixel((BAR_X0, tick_y)) == DARK.bg
 
 
-def test_render_without_narrator_or_series(now_view):
-    nl = dataclasses.replace(now_view.nl, narrator="", series="")
-    img = render_now_listening(dataclasses.replace(now_view, nl=nl))
-    assert img.size == (800, 480) and img.mode == "P"
-    # nothing BLUE in the text column when there is no series line, and no GREEN
-    # specks: antialiased glyph edges would snap to both in finish()
-    assert _count(img, (470, 100, 761, 290), BLUE) == 0
-    assert _count(img, (470, 100, 761, 290), GREEN) == 0
+def test_cover_contained_in_box(now_view):
+    img = render_now_column(now_view, DARK)
+    # the square w400 cover contained in the 520 box at (50, 90): almost no background inside
+    assert _count_not(img, (50, 90, 570, 610), DARK.bg) > 0.9 * 520 * 520
+    assert img.getpixel((25, 350)) == DARK.bg and img.getpixel((595, 350)) == DARK.bg
+    assert img.getpixel((300, 80)) == DARK.bg
 
 
-def _ink_rows(img, box=(470, 100, 761, 290)):
+def test_title_and_rows_below_cover(now_view):
+    img = render_now_column(now_view, DARK)
+    assert _count_near(img, (50, 615, 571, 660), DARK.ink) > 100  # title, first baseline 650
+    assert _count_not(img, (50, 860, 571, 898), DARK.bg) == 0  # nothing touches the bar
+
+
+def test_series_line_in_series_colour(now_view):
+    with_series = dataclasses.replace(now_view.nl, series="Overgeared #1")
+    without = dataclasses.replace(now_view.nl, series="")
+    a = render_now_column(dataclasses.replace(now_view, nl=with_series), DARK)
+    b = render_now_column(dataclasses.replace(now_view, nl=without), DARK)
+    assert _count_near(a, TEXT_BOX, DARK.series) > 30
+    assert _count_near(b, TEXT_BOX, DARK.series) == 0
+
+
+def _ink_rows(img, theme, box=TEXT_BOX):
     x0, y0, x1, y1 = box
-    return {y for y in range(y0, y1) if any(img.getpixel((x, y)) == BLACK for x in range(x0, x1))}
+    return {y for y in range(y0, y1) if any(img.getpixel((x, y)) != theme.bg for x in range(x0, x1))}
 
 
 def test_blank_author_leaves_no_empty_row(now_view):
     def render(**fields):
         nl = dataclasses.replace(now_view.nl, **fields)
-        return render_now_listening(dataclasses.replace(now_view, nl=nl))
+        return render_now_column(dataclasses.replace(now_view, nl=nl), DARK)
 
-    title_only = _ink_rows(render(author="", narrator="", series=""))
-    author_rows = _ink_rows(render(author="Park Saenal", narrator="", series="")) - title_only
-    narrator_rows = _ink_rows(render(author="", narrator="BookTTS AI cast", series="")) - title_only
+    title_only = _ink_rows(render(author="", narrator="", series=""), DARK)
+    author_rows = _ink_rows(render(author="Park Saenal", narrator="", series=""), DARK) - title_only
+    narrator_rows = _ink_rows(render(author="", narrator="BookTTS AI cast", series=""), DARK) - title_only
     assert author_rows and narrator_rows
     # the narrator moves up into the author's row: same top within the font size difference
     assert abs(min(narrator_rows) - min(author_rows)) <= 8
 
 
-def test_series_line_is_blue(now_view):
-    nl = dataclasses.replace(now_view.nl, series="Overgeared #1")
-    img = render_now_listening(dataclasses.replace(now_view, nl=nl))
-    assert _count(img, (470, 100, 761, 290), BLUE) > 30
+def test_long_title_wraps_to_two_lines(now_view):
+    nl = dataclasses.replace(
+        now_view.nl, title="The Extraordinarily Long and Winding Title of a Light Novel Adaptation Volume Twelve"
+    )
+    img = render_now_column(dataclasses.replace(now_view, nl=nl), DARK)
+    assert img.size == (W, H)
+    assert _count_not(img, (50, 860, 571, 898), DARK.bg) == 0
 
 
-def test_cover_fills_the_left_box(now_view):
-    img = render_now_listening(now_view)
-    # the square w400 cover covers the 400x400 box: almost no paper inside it
-    assert _count(img, (40, 40, 440, 440), WHITE) < 0.5 * 400 * 400
-    assert img.getpixel((20, 240)) == WHITE and img.getpixel((450, 240)) == WHITE
+def test_chapter_and_time_lines(now_view):
+    img = render_now_column(now_view, DARK)
+    assert _count_near(img, (50, 938, 571, 958), DARK.ink) > 30  # chapter line at 948
+    assert _count_near(img, (50, 970, 571, 990), DARK.ink) > 30  # time line at 980
 
 
 def test_render_nothing_playing():
-    img = render_now_listening(NowListeningView(None, None, 0, 2026, dict(DEFAULT_BADGE)))
-    assert img.size == (800, 480) and img.mode == "P"
-    assert _count(img, (40, 40, 440, 440), WHITE) == 400 * 400  # no cover
-    assert _count(img, (470, 50, 761, 75), RED) > 0  # NOTHING PLAYING label
-    assert _count(img, (470, 90, 761, 130), BLACK) > 0  # "Nothing played yet"
-    assert _count(img, (470, 290, 761, 325), BLACK) == 0  # no bar, no ticks
+    view = NowListeningView(None, None, 0, 2026, dict(DEFAULT_BADGE))
+    img = render_now_column(view, DARK)
+    assert img.size == (W, H) and img.mode == "RGB"
+    assert _count_not(img, (50, 90, 570, 610), DARK.bg) == 0  # no cover
+    assert _count_near(img, (50, 46, 330, 66), DARK.accent) > 30  # NOTHING PLAYING
+    assert _count_near(img, (50, 615, 571, 660), DARK.ink) > 30  # "Nothing played yet"
+    assert _count_not(img, (50, 895, 571, 925), DARK.bg) == 0  # no bar, no ticks
 
 
-def test_footer_default_and_brand(now_view):
-    img = render_now_listening(now_view)
-    assert all(img.getpixel((x, 410)) == BLACK for x in range(470, 761))  # rule
-    assert _count(img, (470, 424, 640, 441), BLACK) > 0  # "7 finished in 2026"
-    assert _count(img, (470, 424, 640, 441), RED) == 0
-    assert _count(img, (680, 424, 761, 441), GREEN) > 0  # ESTANTE in GREEN
+def test_footer_default_and_no_mark(now_view):
+    for theme in (DARK, PAPER):
+        img = render_now_column(now_view, theme)
+        assert _count_near(img, (60, 1024, 560, 1025), theme.muted, 60) > 450  # rule
+        assert _count_near(img, (50, 1042, 300, 1062), theme.ink) > 20  # "7 finished in 2026"
+        assert _count_near(img, (50, 1040, 571, 1064), theme.accent) == 0
+        assert _count_near(img, (300, 1040, 620, 1064), theme.mark) == 0  # ESTANTE lives on the wall
 
 
-def test_badge_draws_red_message_in_footer(now_view):
+def test_badge_draws_message_in_accent(now_view):
     badge = {"message_waiting": True, "dnd": True, "count": 1, "from": "Jasmine"}
-    img = render_now_listening(dataclasses.replace(now_view, badge=badge))
-    row = [img.getpixel((x, 432)) for x in range(470, 760)]
-    assert RED in row and BLACK in row
+    img = render_now_column(dataclasses.replace(now_view, badge=badge), DARK)
+    assert _count_near(img, (50, 1040, 571, 1064), DARK.accent) > 30
+    assert _count_not(img, (50, 1040, 571, 1064), DARK.bg) > 100
 
 
-def test_waiting_message_takes_the_marks_room(now_view):
-    # "Message from Jasmine waiting" after the QUIET tag does not fit beside ESTANTE
-    # in a 290 px column: the message keeps every word and the mark gives way.
-    badge = {"message_waiting": True, "dnd": True, "count": 1, "from": "Jasmine"}
-    img = render_now_listening(dataclasses.replace(now_view, badge=badge))
-    assert _count(img, (470, 420, 761, 445), GREEN) == 0
-    assert _count(img, (700, 424, 761, 441), RED) > 0
+def test_scaled_column(now_view):
+    s = 720 / 1080
+    img = render_now_column(now_view, DARK, size=(round(620 * s), 720), scale=s)
+    assert img.size == (413, 720)

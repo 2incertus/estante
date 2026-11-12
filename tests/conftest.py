@@ -95,9 +95,9 @@ AUDIOBOOKS_ID = "b14de8f5-99a5-4cba-b970-6a2cb65f2993"
 LIGHT_NOVELS_ID = "65bcd45d-1cce-496c-950e-4f3aabf5f5eb"
 
 
-def _shelf_view(client, cache_dir, library_id, title, subtitle, n_covers, layout):
-    from estante_lib.model import build_shelf, progress_index
-    from estante_lib.render_shelf import ShelfView
+def _wall_view(client, cache_dir, library_id, title, subtitle, n_covers):
+    from estante_lib.model import build_shelf, progress_index, shelf_counts
+    from estante_lib.render_wall import WallView
 
     books = build_shelf(client.library_items(library_id), progress_index(client.me()))
     covers = {}
@@ -105,64 +105,22 @@ def _shelf_view(client, cache_dir, library_id, title, subtitle, n_covers, layout
         img = _cover_image(client, cache_dir, book.item_id, book.updated_at, 80)
         if img is not None:
             covers[book.item_id] = img
-    return ShelfView(title, subtitle, books, covers, page=0, layout=layout)
+    return WallView(title, subtitle, books, covers, shelf_counts(books))
 
 
 @pytest.fixture
-def shelf_view(client, tmp_path):
-    """Audiobooks fixture, covers for the first 12 books (all recorded), page 0."""
-    view = _shelf_view(
-        client, tmp_path / "covers", AUDIOBOOKS_ID, "The shelf", "Audiobooks, by author", 12, "pages"
-    )
-    assert len(view.covers) == 12
+def wall_view(client, tmp_path):
+    """Audiobooks fixture (311 books), covers for the first 12 (all recorded)."""
+    view = _wall_view(client, tmp_path / "covers", AUDIOBOOKS_ID, "Audiobooks", "Audiobooks, by author", 12)
+    assert len(view.books) == 311 and len(view.covers) == 12
     return view
 
 
 @pytest.fixture
-def novels_view(client, tmp_path):
-    """Light novels fixture (597 books), covers for the first 6 (all recorded), mosaic."""
-    view = _shelf_view(
-        client, tmp_path / "covers", LIGHT_NOVELS_ID, "Light novels", "Light Novels, by author", 6, "mosaic"
+def novels_wall_view(client, tmp_path):
+    """Light novels fixture (597 books), covers for the first 6 (all recorded)."""
+    view = _wall_view(
+        client, tmp_path / "covers", LIGHT_NOVELS_ID, "Light novels", "Light Novels, by author", 6
     )
-    assert len(view.covers) == 6
+    assert len(view.books) == 597 and len(view.covers) == 6
     return view
-
-
-INKYPI_DIR = REPO / ".inkypi"
-INKYPI_SRC = INKYPI_DIR / "src"
-
-
-def put_inkypi_on_path():
-    """Make InkyPi's `plugins` package (with our symlinked plugins) importable."""
-    src = str(INKYPI_SRC)
-    if src not in sys.path:
-        sys.path.insert(1, src)
-
-
-def expected_now_render(client, cache_dir, year, tz, badge=None):
-    """Now listening rendered directly from estante_lib, as the plugin should."""
-    from estante_lib.model import finished_in_year, pick_now_listening
-    from estante_lib.render_now import NowListeningView, render_now_listening
-    from estante_lib.state import DEFAULT_BADGE
-
-    nl = pick_now_listening(client)
-    cover = _cover_image(client, cache_dir, nl.item_id, nl.updated_at, 400) if nl else None
-    finished = finished_in_year(client.me(), year, tz)
-    view = NowListeningView(nl, cover, finished, year, dict(badge or DEFAULT_BADGE))
-    return render_now_listening(view)
-
-
-def expected_shelf_render(client, cache_dir, library_id, title, subtitle, layout, page, cols=10, rows=5):
-    """The shelf rendered directly from estante_lib, as the plugin should."""
-    from estante_lib.model import build_shelf, progress_index
-    from estante_lib.render_shelf import ShelfView, page_books, render_shelf
-
-    books = build_shelf(client.library_items(library_id), progress_index(client.me()))
-    shown = books if layout == "mosaic" else page_books(books, page, cols * rows)[0]
-    covers = {}
-    for book in shown:
-        img = _cover_image(client, cache_dir, book.item_id, book.updated_at, 80)
-        if img is not None:
-            covers[book.item_id] = img
-    view = ShelfView(title, subtitle, books, covers, page=page, layout=layout, cols=cols, rows=rows)
-    return render_shelf(view)
