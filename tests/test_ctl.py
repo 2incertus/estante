@@ -462,7 +462,8 @@ def test_screen_off_blanks_and_stops_blits(http, conductor, fake_abs):
     shown = rendered(conductor)
     r = http.post("/screen", {"on": False})
     assert r.status == 202 and r.body == {"screen": {"on": False, "dim": 1.0}}
-    assert conductor.fb.blank_calls == [True]
+    # the boot unblank, then the screen-off
+    assert conductor.fb.blank_calls == [False, True]
     count = render_count(conductor)
     bump_progress(fake_abs, seconds=3 * 3600)
     time.sleep(1.0)
@@ -481,7 +482,7 @@ def test_unblank_triggers_redraw(http, conductor, fake_abs):
     r = http.post("/screen", {"on": True})
     assert r.status == 202 and r.body["screen"]["on"] is True
     after = renders_after(conductor, count)
-    assert conductor.fb.blank_calls == [True, False]
+    assert conductor.fb.blank_calls == [False, True, False]
     assert after != shown
 
 
@@ -489,7 +490,7 @@ def test_screen_off_paints_black_when_blank_is_refused(make_conductor):
     c = make_conductor(fb_cls=NoBlankFramebuffer)
     rendered(c)
     c.set_screen(on=False)
-    assert c.fb.blank_calls == [True]
+    assert c.fb.blank_calls == [False, True]
     assert frame(c) == bytes(1920 * 1080 * 2)
 
 
@@ -512,7 +513,7 @@ def test_screen_off_during_render_wins(make_conductor, monkeypatch):
     time.sleep(0.5)
     assert frame(c) == before
     assert c.snapshot()["last_render"] is None
-    assert c.fb.blank_calls == [True]
+    assert c.fb.blank_calls == [False, True]
 
 
 def test_dim_redraws_darker_and_validates(http, conductor):
@@ -721,14 +722,14 @@ def test_repeated_screen_off_blanks_again(make_conductor, tmp_path):
     rendered(c)
     c.set_screen(on=False)
     c.set_screen(on=False)
-    assert c.fb.blank_calls == [True, True]
+    assert c.fb.blank_calls == [False, True, True]
     b = make_conductor(fb_cls=NoBlankFramebuffer, fb_name="fb-noblank", state_dir=str(tmp_path / "state-b"))
     rendered(b)
     b.set_screen(on=False)
     with open(b.cfg["fb_file"], "r+b") as f:
         f.write(b"\xff" * 64)
     b.set_screen(on=False)
-    assert b.fb.blank_calls == [True, True]
+    assert b.fb.blank_calls == [False, True, True]
     assert frame(b) == bytes(1920 * 1080 * 2)
 
 
@@ -740,7 +741,7 @@ def test_screen_on_redraws_when_unblank_is_refused(make_conductor):
     count = render_count(c)
     c.set_screen(on=True)
     after = renders_after(c, count)
-    assert c.fb.blank_calls == [True, False]
+    assert c.fb.blank_calls == [False, True, False]
     assert after != bytes(1920 * 1080 * 2)
 
 
@@ -783,3 +784,101 @@ def test_render_errors_are_logged_once_per_error(make_conductor, monkeypatch, ca
     failures = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert len(failures) == 1
     assert "renderer broke" in str(failures[0].exc_info[1])
+
+
+# final fix wave
+
+
+class RecordingFramebuffer(FileFramebuffer):
+    """Records blank and show calls in the order they happen."""
+
+    def __init__(self, path, info):
+        super().__init__(path, info)
+        self.events = []
+
+    def blank(self, on):
+        self.events.append(("blank", bool(on)))
+        return super().blank(on)
+
+    def show(self, pixels, size):
+        self.events.append(("show",))
+        return super().show(pixels, size)
+
+
+def test_boot_with_the_screen_on_unblanks_before_the_mark(make_conductor):
+    # a panel left blanked by the console (fb0/blank reads 4) wakes at service start
+    c = make_conductor(fb_cls=RecordingFramebuffer, abs_url=f"http://127.0.0.1:{closed_port()}")
+    wait_until(lambda: frame(c) == mark_bytes())
+    assert c.fb.blank_calls == [False]
+    assert c.fb.events[:2] == [("blank", False), ("show",)]
+
+
+def test_boot_ignores_a_refused_unblank(make_conductor):
+    c = make_conductor(fb_cls=NoBlankFramebuffer, abs_url=f"http://127.0.0.1:{closed_port()}")
+    wait_until(lambda: frame(c) == mark_bytes())
+    assert c.fb.blank_calls == [False]
+    assert c.is_alive()
+
+
+def test_covers_are_fetched_while_the_screen_is_off(make_conductor, fake_abs, tmp_path):
+    write_state({"screen": {"on": False, "dim": 1.0}}, str(tmp_path / "state" / "state.json"))
+    c = make_conductor(walls=[{"name": "audiobooks", "library_id": ""}])
+    wait_until(lambda: c.snapshot()["now_listening"] is not None)
+    wait_until(lambda: not c.snapshot()["busy"])
+    covers = [p for p in fake_abs.calls if p.endswith("/cover")]
+    assert f"/api/items/{IN_PROGRESS_ID}/cover" in covers
+    assert len(covers) > 1
+    assert c.snapshot()["last_render"] is None
+    assert frame(c) == bytes(1920 * 1080 * 2)
+    # turning the screen on draws from the cache, without a second round of cover requests
+    c.set_screen(on=True)
+    rendered(c)
+    assert len([p for p in fake_abs.calls if p.endswith("/cover")]) == len(covers)
+
+
+def test_body_over_the_cap_is_413_without_reading_it(http, conductor):
+    host, port = http.base.rsplit("/", 1)[1].split(":")
+    with socket.create_connection((host, int(port)), timeout=5) as s:
+        s.sendall(
+            b"POST /badge HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+            b"Content-Length: 65537\r\n\r\n"
+        )
+        reply = b""
+        while b"\r\n\r\n" not in reply or not reply.rstrip().endswith(b"}"):
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            reply += chunk
+    head, body = reply.split(b"\r\n\r\n", 1)
+    assert head.startswith(b"HTTP/1.0 413") or head.startswith(b"HTTP/1.1 413"), head
+    assert json.loads(body) == {"error": "body too large"}
+    # a body at the cap is still read
+    assert http.post("/badge", raw=json.dumps({"dnd": True}).ljust(65536).encode()).status == 202
+
+
+def test_an_unexpected_answer_shape_logs_once(make_conductor, fake_abs, caplog):
+    caplog.set_level(logging.WARNING, logger="estante-ctl")
+    fake_abs.override("/api/me", [])
+    c = make_conductor()
+    wait_until(lambda: sum(1 for p in fake_abs.calls if p == "/api/me") >= 4)
+    assert c.is_alive()
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    assert "Audiobookshelf" in warnings[0].getMessage() and warnings[0].exc_info is None
+
+
+def test_screen_answers_202_when_the_state_cannot_be_saved(http, conductor, tmp_path, caplog):
+    rendered(conductor)
+    caplog.set_level(logging.WARNING, logger="estante-ctl")
+    state_dir = tmp_path / "state"
+    for p in state_dir.glob("state.json*"):
+        p.unlink()
+    state_dir.chmod(0o555)
+    try:
+        r = http.post("/screen", {"on": False})
+    finally:
+        state_dir.chmod(0o755)
+    assert r.status == 202 and r.body == {"screen": {"on": False, "dim": 1.0}}
+    assert conductor.fb.blank_calls[-1] is True
+    assert conductor.snapshot()["screen"]["on"] is False
+    assert any("screen" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)

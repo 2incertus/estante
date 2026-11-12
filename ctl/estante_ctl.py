@@ -73,6 +73,8 @@ COVER_LOG_EVERY = 50
 # cover load stops until the next wall refresh
 COVER_SLOW_S = 2.0
 COVER_SLOW_LIMIT = 3
+# the largest request body read; Ouvido and HA send a few dozen bytes
+MAX_BODY = 65536
 DEFAULT_SCREEN = {"on": True, "dim": 1.0}
 
 
@@ -290,7 +292,11 @@ class Conductor(threading.Thread):
                 self._power_down()
             elif on is True:
                 self.fb.blank(False)
-        update_state(lambda state: state.__setitem__("screen", dict(screen)), self.state_path)
+        try:
+            update_state(lambda state: state.__setitem__("screen", dict(screen)), self.state_path)
+        except OSError as e:
+            # the panel already changed: answer for it, a restart falls back to the saved state
+            log.warning("cannot record the screen state: %s", e)
         if screen["on"] and (screen["on"] != was["on"] or screen["dim"] != was["dim"]):
             self.request("redraw")
         return screen
@@ -407,7 +413,7 @@ class Conductor(threading.Thread):
         try:
             try:
                 changed = self._fetch(now, force_items)
-            except (AbsError, ValueError, KeyError, TypeError) as e:
+            except (AbsError, ValueError, KeyError, TypeError, AttributeError) as e:
                 self._abs_failed(str(e) or type(e).__name__)
                 return
             self._abs_ok()
@@ -479,28 +485,34 @@ class Conductor(threading.Thread):
         return self._now_cover[1]
 
     def _render(self):
-        """Compose the screen from the last poll and blit it; the mark until ABS has answered."""
-        if not self._screen_on():
-            return
+        """Compose the screen from the last poll and blit it; the mark until ABS has answered.
+
+        With the screen off the covers are still fetched, so turning it on draws at once.
+        """
         if self._books is None:
-            self._blit(render_mark(self.theme, self.canvas))
+            if self._screen_on():
+                self._blit(render_mark(self.theme, self.canvas))
             return
         index, wall = self._current_wall()
         with self._lock:
             nl = self._nl
+        now_cover = self._load_now_cover(nl)
+        wall_covers = self._load_wall_covers(index, self._books)
+        if not self._screen_on():
+            return
+        with self._lock:
             dim = self._screen["dim"]
         badge = read_state(self.state_path).get("badge")
         local = datetime.now().astimezone()
         now_view = NowListeningView(
             nl,
-            self._load_now_cover(nl),
+            now_cover,
             finished_in_year(self._me, local.year, local.tzinfo),
             local.year,
             badge,
         )
         wall_view = WallView(
-            wall.title, wall.subtitle, self._books, self._load_wall_covers(index, self._books),
-            shelf_counts(self._books),
+            wall.title, wall.subtitle, self._books, wall_covers, shelf_counts(self._books),
         )
         img = render_screen(ScreenView(now_view, wall_view, self.theme, dim), self.canvas)
         if self._blit(img):
@@ -539,7 +551,10 @@ class Conductor(threading.Thread):
     def _boot(self):
         with self._fb_lock:
             on = self._screen_on()
-            if not on:
+            if on:
+                # wake a panel the console left blanked; a refusal is fine, the frame follows
+                self.fb.blank(False)
+            else:
                 self._power_down()
         if on:
             self._blit(render_mark(self.theme, self.canvas))
@@ -576,6 +591,10 @@ class BadRequest(ValueError):
     pass
 
 
+class BodyTooLarge(ValueError):
+    pass
+
+
 def parse_screen(data):
     """(on, dim) from a /screen body; BadRequest when either is missing its type or range."""
     if not isinstance(data, dict):
@@ -609,6 +628,8 @@ def make_handler(conductor):
 
         def _json_body(self):
             length = int(self.headers.get("Content-Length") or 0)
+            if length > MAX_BODY:
+                raise BodyTooLarge(length)
             raw = self.rfile.read(length) if length > 0 else b""
             return json.loads(raw) if raw.strip() else {}
 
@@ -628,6 +649,11 @@ def make_handler(conductor):
                 return
             try:
                 data = self._json_body()
+            except BodyTooLarge:
+                # the body stays unread, so this connection cannot carry another request
+                self.close_connection = True
+                self._send(413, {"error": "body too large"})
+                return
             except ValueError:
                 self._send(400, {"error": "bad JSON"})
                 return
