@@ -533,6 +533,23 @@ def test_dim_redraws_darker_and_validates(http, conductor):
     assert conductor.snapshot()["screen"] == {"on": True, "dim": 0.5}
 
 
+def test_bare_on_restores_full_brightness(http, conductor):
+    # the evening rule dims; a spoken "screen on" sends only {"on": true} and must undo the dim
+    r = http.post("/screen", {"on": True, "dim": 0.6})
+    assert r.status == 202 and r.body == {"screen": {"on": True, "dim": 0.6}}
+    count = render_count(conductor)
+    r = http.post("/screen", {"on": True})
+    assert r.status == 202 and r.body == {"screen": {"on": True, "dim": 1.0}}
+    renders_after(conductor, count)
+    assert read_state(estante_ctl.state_file(conductor.cfg))["screen"] == {"on": True, "dim": 1.0}
+    # an explicit dim with "on" is still honoured, so Home Assistant's evening call keeps working
+    r = http.post("/screen", {"on": True, "dim": 0.6})
+    assert r.body == {"screen": {"on": True, "dim": 0.6}}
+    # "off" alone never touches the dim level
+    r = http.post("/screen", {"on": False})
+    assert r.body == {"screen": {"on": False, "dim": 0.6}}
+
+
 def test_screen_state_survives_a_restart(make_conductor, tmp_path):
     state = tmp_path / "state" / "state.json"
     write_state({"screen": {"on": False, "dim": 0.4}}, str(state))

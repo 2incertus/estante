@@ -279,7 +279,14 @@ class Conductor(threading.Thread):
         return result["badge"], result["changed"]
 
     def set_screen(self, on=None, dim=None):
-        """Power and brightness from Home Assistant; persisted so a restart keeps them."""
+        """Power and brightness from Home Assistant or a voice phrase; persisted so a restart keeps them.
+
+        A bare "on" (no dim given) means full brightness: "screen on" said at night must undo the
+        evening dim, and Home Assistant always sends an explicit dim when it wants one kept.
+        """
+        log.info("screen request: on=%s dim=%s", on, dim)
+        if on is True and dim is None:
+            dim = 1.0
         with self._fb_lock:
             with self._lock:
                 was = dict(self._screen)
